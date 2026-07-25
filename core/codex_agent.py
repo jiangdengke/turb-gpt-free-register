@@ -57,6 +57,12 @@ AGENT_HARNESS_ID = "codex-cli"
 RUNNING_LOCATION = "local"
 
 
+class AgentRegistryNotEnabledError(RuntimeError):
+    """账号未开放 Agent Identity 注册能力。"""
+
+    code = "agent_registry_not_enabled"
+
+
 # ============================================================
 #  日志
 # ============================================================
@@ -237,7 +243,6 @@ def register_agent(
     public_key_ssh: str,
     env: Any | None = None,
     timeout: int = 15,
-    display_name: str | None = None,
 ) -> str:
     """
     在 auth.openai.com 注册 agent。
@@ -246,20 +251,15 @@ def register_agent(
     :param public_key_ssh: SSH 格式的 Ed25519 公钥
     :return: agent_runtime_id
     """
-    name = str(display_name or "").strip() or _random_agent_display_name()
     payload = {
         "abom": {
             "agent_version": AGENT_VERSION,
             "agent_harness_id": AGENT_HARNESS_ID,
             "running_location": RUNNING_LOCATION,
-            # OpenAI Agent 场景也使用本轮随机名称，避免固定同一个展示名。
-            "display_name": name,
-            "agent_name": name,
         },
         "agent_public_key": public_key_ssh,
-        "display_name": name,
-        "agent_name": name,
-        "name": name,
+        "capabilities": ["responsesapi"],
+        "ttl": None,
     }
 
     r = _agent_post(
@@ -270,25 +270,18 @@ def register_agent(
         payload=payload,
     )
 
-    # 兼容 OpenAI 接口严格校验未知字段的情况：如果命名字段不被接受，回退到原始协议。
-    if r.status_code == 400 and any(x in (r.text or "").lower() for x in ("unknown", "unrecognized", "extra", "invalid")):
-        _log("Step 3", f"OpenAI Agent 注册接口不接受名称字段，回退原始 payload: {r.text[:180]}", "WARN")
-        r = _agent_post(
-            f"{AUTHAPI_BASE}/v1/agent/register",
-            access_token=access_token,
-            env=env,
-            timeout=timeout,
-            payload={
-                "abom": {
-                    "agent_version": AGENT_VERSION,
-                    "agent_harness_id": AGENT_HARNESS_ID,
-                    "running_location": RUNNING_LOCATION,
-                },
-                "agent_public_key": public_key_ssh,
-            },
-        )
-
-    if r.status_code != 200:
+    if not 200 <= r.status_code < 300:
+        error_code = ""
+        try:
+            body = r.json()
+            if isinstance(body, dict) and isinstance(body.get("error"), dict):
+                error_code = str(body["error"].get("code") or "").strip()
+        except Exception:
+            pass
+        if error_code == AgentRegistryNotEnabledError.code:
+            raise AgentRegistryNotEnabledError(
+                "该账号未开放 Agent Registry，不能创建 agent_identity"
+            )
         raise RuntimeError(f"Agent registration failed: {r.status_code} {r.text}")
 
     data = r.json()
@@ -345,7 +338,13 @@ def register_task(
         raise RuntimeError(f"Task registration failed: {r.status_code} {r.text}")
 
     data = r.json()
-    return data.get("encrypted_task_id", "")
+    return (
+        data.get("task_id")
+        or data.get("taskId")
+        or data.get("encrypted_task_id")
+        or data.get("encryptedTaskId")
+        or ""
+    )
 
 
 # ============================================================
@@ -663,9 +662,8 @@ def create_codex_agent_identity(
     _log("Step 2", f"public_key_fingerprint={_fingerprint(public_key_ssh)}", "OK")
 
     # Step 3: 注册 agent
-    agent_display_name = _random_agent_display_name()
-    _log("Step 3", f"在 auth.openai.com 注册 agent，display_name={agent_display_name}...")
-    agent_runtime_id = register_agent(access_token, public_key_ssh, env=env, timeout=timeout, display_name=agent_display_name)
+    _log("Step 3", "在 auth.openai.com 注册 agent...")
+    agent_runtime_id = register_agent(access_token, public_key_ssh, env=env, timeout=timeout)
     _log("Step 3", f"agent_runtime_id={agent_runtime_id}", "OK")
 
     # Step 4: 验证 task 注册（可选）

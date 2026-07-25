@@ -13,7 +13,10 @@ import logging
 import re
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
+from html import unescape
 from pathlib import Path
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import requests
 
@@ -25,6 +28,8 @@ logger = logging.getLogger(__name__)
 _CODE_REGEX = re.compile(r"\b(\d{6})\b")
 _CONTEXT_WORDS = ("code", "verify", "verification", "验证码", "代码", "确认码", "認証", "コード")
 _CONTEXT_CACHE: dict[str, "GenericApiEmailAccount"] = {}
+_LAST_OTP_META: dict[str, dict] = {}
+_MESSAGE_TIME_SKEW_SECONDS = 10.0
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _ACCOUNTS_FILE = _PROJECT_ROOT / "用于注册的API邮箱.txt"
 
@@ -54,6 +59,19 @@ def _flatten_json(obj) -> str:
     return "\n".join(parts)
 
 
+def _visible_text(text: str) -> str:
+    """Remove non-visible HTML so digits in styles and link URLs are not treated as OTPs."""
+    text = re.sub(
+        r"<(?:script|style|noscript)\b[^>]*>.*?</(?:script|style|noscript)>",
+        " ",
+        text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    text = re.sub(r"<!--.*?-->", " ", text, flags=re.DOTALL)
+    text = re.sub(r"<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", unescape(text)).strip()
+
+
 def _extract_code(text: str) -> str | None:
     """从纯文本/HTML/JSON 文本中提取 6 位 OTP。"""
     if not text:
@@ -73,10 +91,13 @@ def _extract_code(text: str) -> str | None:
         if code:
             return code
 
-        codes = _CODE_REGEX.findall(body)
+        # 只在可见文本中兜底。原始 HTML 的 style 色值、href 查询参数等
+        # 也可能包含 6 位数字，直接扫源码会把这些无关数字误当成 OTP。
+        visible = _visible_text(body)
+        codes = _CODE_REGEX.findall(visible)
         if not codes:
             continue
-        lower = body.lower()
+        lower = visible.lower()
         for code in codes:
             idx = lower.find(code)
             window = lower[max(0, idx - 80): idx + 86]
@@ -84,6 +105,107 @@ def _extract_code(text: str) -> str | None:
                 return code
         return codes[-1]
     return None
+
+
+def _parse_message_timestamp(value) -> float | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _extract_message_code(message: dict) -> str | None:
+    verify_code = message.get("verifyCode") or message.get("verify_code")
+    if isinstance(verify_code, dict):
+        for key in ("code", "value", "otp"):
+            code = str(verify_code.get(key) or "").strip()
+            if _CODE_REGEX.fullmatch(code):
+                return code
+    elif verify_code is not None:
+        code = str(verify_code).strip()
+        if _CODE_REGEX.fullmatch(code):
+            return code
+
+    searchable = {
+        key: message.get(key)
+        for key in ("subject", "text", "content", "html", "body")
+        if message.get(key) is not None
+    }
+    return _extract_code(json.dumps(searchable, ensure_ascii=False))
+
+
+def _extract_code_with_meta(text: str) -> tuple[str | None, float | None]:
+    """Extract the newest message OTP and its server-provided timestamp."""
+    try:
+        payload = json.loads(text)
+    except Exception:
+        return _extract_code(text), None
+
+    messages = payload.get("data") if isinstance(payload, dict) else None
+    if isinstance(messages, list):
+        candidates: list[tuple[str, float | None, int]] = []
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            code = _extract_message_code(message)
+            if not code:
+                continue
+            message_ts = _parse_message_timestamp(
+                message.get("date")
+                or message.get("receivedAt")
+                or message.get("received_at")
+                or message.get("createdAt")
+                or message.get("created_at")
+            )
+            candidates.append((code, message_ts, index))
+        if candidates:
+            code, message_ts, _ = max(
+                candidates,
+                key=lambda item: (
+                    item[1] is not None,
+                    item[1] if item[1] is not None else -item[2],
+                ),
+            )
+            return code, message_ts
+
+    return _extract_code(text), None
+
+
+def _structured_request_url(url: str) -> tuple[str, bool]:
+    """Ask supported mailbox APIs for JSON while preserving generic URL behavior."""
+    try:
+        parsed = urlsplit(url)
+    except Exception:
+        return url, False
+    if parsed.hostname != "api.xiaoheifk.cn" or parsed.path.rstrip("/") != "/api/mail-new":
+        return url, False
+
+    query = parse_qsl(parsed.query, keep_blank_values=True)
+    query = [(key, "json" if key == "response_type" else value) for key, value in query]
+    if not any(key == "response_type" for key, _ in query):
+        query.append(("response_type", "json"))
+    query = [(key, value) for key, value in query if key != "_ts"]
+    query.append(("_ts", str(int(time.time() * 1000))))
+    return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment)), True
+
+
+def is_fresh_otp(email: str, code: str, after_ts: float | None) -> bool:
+    """Return whether the last fetched code came from a message newer than this attempt."""
+    if after_ts is None:
+        return False
+    meta = _LAST_OTP_META.get(str(email or "").strip().lower()) or {}
+    message_ts = meta.get("message_ts")
+    return (
+        str(meta.get("code") or "") == str(code or "")
+        and isinstance(message_ts, (int, float))
+        and message_ts >= float(after_ts) - _MESSAGE_TIME_SKEW_SECONDS
+    )
 
 
 def pick_account() -> GenericApiEmailAccount:
@@ -143,6 +265,7 @@ def release_account(email: str, status: str = "available", note: str | None = No
     from core.db import release_generic_api_email
     release_generic_api_email(email, status=status, note=note)
     _CONTEXT_CACHE.pop(email, None)
+    _LAST_OTP_META.pop(str(email or "").strip().lower(), None)
 
 
 def fetch_latest_otp(
@@ -181,18 +304,43 @@ def fetch_latest_otp(
 
     while time.time() < deadline:
         try:
-            resp = requests.get(account.code_url, headers=headers, timeout=20, verify=False)
+            request_url, requires_message_time = _structured_request_url(account.code_url)
+            resp = requests.get(request_url, headers=headers, timeout=20, verify=False)
             text = resp.text or ""
             if resp.status_code == 200:
-                code = _extract_code(text)
+                code, message_ts = _extract_code_with_meta(text)
+                if (
+                    code
+                    and requires_message_time
+                    and after_ts is not None
+                    and (
+                        message_ts is None
+                        or message_ts < float(after_ts) - _MESSAGE_TIME_SKEW_SECONDS
+                    )
+                ):
+                    if message_ts is None:
+                        last_error = "取码接口响应缺少邮件时间，暂不接受为本轮验证码"
+                    else:
+                        last_error = (
+                            "最新验证码邮件早于本轮请求时间: "
+                            f"message={datetime.fromtimestamp(message_ts, timezone.utc).isoformat()} "
+                            f"after={datetime.fromtimestamp(float(after_ts), timezone.utc).isoformat()}"
+                        )
+                    code = None
                 if code:
                     now_seen = time.time()
-                    if not best_otp:
+                    if not best_otp or message_ts != _LAST_OTP_META.get(email.lower(), {}).get("message_ts"):
                         best_otp = code
                         best_seen_at = now_seen
                         settle_until = now_seen + settle
+                        _LAST_OTP_META[email.lower()] = {
+                            "code": code,
+                            "message_ts": message_ts,
+                            "after_ts": after_ts,
+                        }
                         logger.info(
-                            f"[GenericAPI] 首次锁定 OTP={code}, "
+                            f"[GenericAPI] 锁定 OTP={code}"
+                            f"{'（邮件时间已校验）' if message_ts is not None else ''}, "
                             f"等 {settle}s 看取码接口是否出现更新验证码..."
                         )
                     elif code != best_otp:
@@ -203,6 +351,11 @@ def fetch_latest_otp(
                         best_otp = code
                         best_seen_at = now_seen
                         settle_until = now_seen + settle
+                        _LAST_OTP_META[email.lower()] = {
+                            "code": code,
+                            "message_ts": message_ts,
+                            "after_ts": after_ts,
+                        }
                     else:
                         logger.debug(f"[GenericAPI] 取码接口仍返回候选 OTP={best_otp}")
                 else:

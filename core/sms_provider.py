@@ -9,6 +9,7 @@
 
 当前支持：
     - GrizzlySMS：GET 文本接口，文档 https://api.grizzlysms.com
+    - SMS Activation Service：GET 文本接口，文档 https://sms-verification-number.com/cn/api-sms-activate/
     - L：本地 JSON 管理接口，文档 L_API.md
     - H：本地 JSON 管理接口，文档 H_API.md
 
@@ -63,20 +64,51 @@ def _http() -> CurlSession:
 
 
 def _provider() -> str:
-    return str(getattr(_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+    provider = str(getattr(_cfg, "SMS_PROVIDER", "grizzly") or "grizzly").strip().lower()
+    if provider in ("sms-activate", "sms_activate", "smsactivation", "sv", "svnumber", "sv_number"):
+        return "sms_activate"
+    return provider
 
 
-def _request_grizzly(http: CurlSession, params: dict) -> str:
+def _handler_api_settings() -> tuple[str, str, str, str]:
+    """返回 SMS-Activate 兼容接口的 (平台名, API地址, API密钥, lang)。"""
+    if _provider() == "sms_activate":
+        name = "SMS Activation Service"
+        api_base = str(getattr(_cfg, "SMS_ACTIVATE_API_BASE", "") or "").strip()
+        api_key = str(getattr(_cfg, "SMS_ACTIVATE_API_KEY", "") or "").strip()
+        lang = str(getattr(_cfg, "SMS_ACTIVATE_LANG", "en") or "en").strip().lower()
+        if not api_base:
+            raise SmsProviderError("SMS_ACTIVATE_API_BASE 不能为空")
+        if not api_key:
+            raise SmsProviderError("SMS_ACTIVATE_API_KEY 不能为空")
+        if lang not in ("en", "ru"):
+            raise SmsProviderError("SMS_ACTIVATE_LANG 仅支持 en 或 ru")
+        return name, api_base, api_key, lang
+
+    name = "GrizzlySMS"
+    api_base = str(getattr(_cfg, "SMS_API_BASE", "") or "").strip()
+    api_key = str(getattr(_cfg, "SMS_API_KEY", "") or "").strip()
+    if not api_base:
+        raise SmsProviderError("SMS_API_BASE 不能为空")
+    if not api_key:
+        raise SmsProviderError("SMS_API_KEY 不能为空")
+    return name, api_base, api_key, ""
+
+
+def _request_handler_api(http: CurlSession, params: dict) -> str:
     """
-    发一个 GrizzlySMS API 请求，返回去空白的响应文本。
+    发一个 SMS-Activate 兼容 API 请求，返回去空白的响应文本。
     统一识别公共错误码并抛对应异常。
     """
-    base_params = {"api_key": _cfg.SMS_API_KEY}
+    name, api_base, api_key, lang = _handler_api_settings()
+    base_params = {"api_key": api_key}
+    if lang:
+        base_params["lang"] = lang
     base_params.update(params)
-    resp = http.get(_cfg.SMS_API_BASE, params=base_params)
+    resp = http.get(api_base, params=base_params)
     if resp.status_code != 200:
         raise SmsProviderError(
-            f"GrizzlySMS HTTP {resp.status_code}: {(resp.text or '')[:200]}"
+            f"{name} HTTP {resp.status_code}: {(resp.text or '')[:200]}"
         )
     text = (resp.text or "").strip()
 
@@ -93,6 +125,10 @@ def _request_grizzly(http: CurlSession, params: dict) -> str:
         raise SmsProviderError(f"接码平台请求参数错误：{text}")
     if text == "NO_ACTIVATION":
         raise SmsProviderError("激活 ID 不存在（NO_ACTIVATION）")
+    if text == "BAD_LANG":
+        raise SmsProviderError("接码平台语言参数无效（BAD_LANG），仅支持 en 或 ru")
+    if text in ("ERROR_SQL", "ERROR_API", "REQUEST_LIMIT"):
+        raise SmsProviderError(f"接码平台服务异常：{text}")
     if text.startswith("The service is prohibited"):
         raise SmsProviderError(f"该服务被平台禁售：{text}")
 
@@ -382,15 +418,21 @@ def acquire_number(
             )
             return activation_id, phone
 
+        default_service = _cfg.SMS_SERVICE
+        default_country = _cfg.SMS_COUNTRY
+        if _provider() == "sms_activate":
+            default_service = getattr(_cfg, "SMS_ACTIVATE_SERVICE", "dr") or "dr"
+            default_country = getattr(_cfg, "SMS_ACTIVATE_COUNTRY", "187") or "187"
+
         params = {
             "action": "getNumber",
-            "service": service or _cfg.SMS_SERVICE,
-            "country": country or _cfg.SMS_COUNTRY,
+            "service": service or default_service,
+            "country": country or default_country,
         }
         if _cfg.SMS_MAX_PRICE:
             params["maxPrice"] = _cfg.SMS_MAX_PRICE
 
-        text = _request_grizzly(http, params)
+        text = _request_handler_api(http, params)
         # 成功格式：ACCESS_NUMBER:激活ID:号码
         if not text.startswith("ACCESS_NUMBER:"):
             raise SmsProviderError(f"getNumber 非预期响应：{text[:200]}")
@@ -398,9 +440,11 @@ def acquire_number(
         if len(parts) < 3:
             raise SmsProviderError(f"getNumber 响应格式异常：{text[:200]}")
         activation_id = parts[1].strip()
-        phone = parts[2].strip()
+        phone = _normalize_phone_digits(parts[2])
+        if not activation_id or not phone:
+            raise SmsProviderError(f"getNumber 响应缺少激活ID或手机号：{text[:200]}")
         _ACQUIRED_AT[activation_id] = time.time()
-        logger.info(f"[SMS] 取号成功：activation_id={activation_id}, phone=+{phone}")
+        logger.info(f"[SMS:{_provider()}] 取号成功：activation_id={activation_id}, phone=+{phone}")
         return activation_id, phone
     finally:
         if own_http:
@@ -481,7 +525,7 @@ def wait_for_sms_code(
                 time.sleep(interval)
                 continue
 
-            text = _request_grizzly(http, {"action": "getStatus", "id": activation_id})
+            text = _request_handler_api(http, {"action": "getStatus", "id": activation_id})
 
             if text.startswith("STATUS_OK:"):
                 code = text.split(":", 1)[1].strip()
@@ -518,7 +562,7 @@ def set_status(activation_id: str, status: int, http: CurlSession | None = None)
         if _provider() == "l":
             logger.debug(f"[SMS:L] 忽略状态设置 id={activation_id}, status={status}")
             return "OK"
-        return _request_grizzly(http, {"action": "setStatus", "status": str(status), "id": activation_id})
+        return _request_handler_api(http, {"action": "setStatus", "status": str(status), "id": activation_id})
     finally:
         if own_http:
             http.close()

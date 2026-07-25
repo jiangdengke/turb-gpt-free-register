@@ -86,6 +86,13 @@ def create_app(auth_code: str | None = None) -> Flask:
 
     init_auth(app, auth_code=auth_code)
     register_auth_routes(app)
+    recovered_registrations = db.recover_interrupted_registration_jobs()
+    if recovered_registrations["jobs"]:
+        logger.warning(
+            "已结束 %s 个因 WebUI 重启中断的注册任务，并回收 %s 个未注册邮箱",
+            recovered_registrations["jobs"],
+            recovered_registrations["emails"],
+        )
     recovered_plan_checks = db.recover_interrupted_plan_checks()
     if recovered_plan_checks:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的套餐查询状态", recovered_plan_checks)
@@ -144,6 +151,149 @@ def create_app(auth_code: str | None = None) -> Flask:
         archived = str(request.args.get("archived", default="0") or "0").lower()
         plan_filter = str(request.args.get("plan", default="") or "").lower()
         return jsonify(db.list_accounts(limit=limit, archived=archived, plan_filter=plan_filter))
+
+    @app.get("/api/accounts/filter-counts")
+    def api_account_filter_counts():
+        """返回当前归档视图中的 Plus 与 Plus 试用资格账号数量。"""
+        archived = str(request.args.get("archived", default="0") or "0").lower()
+        return jsonify({
+            "plus": len(db.list_accounts(limit=100000, archived=archived, plan_filter="plus")),
+            "plus_trial": len(db.list_accounts(limit=100000, archived=archived, plan_filter="plus_trial")),
+        })
+
+    def _export_account_emails(
+        *,
+        plan_filter: str = "",
+        accounts: list[dict] | None = None,
+        include_account,
+        filename_prefix: str,
+        empty_error: str,
+        initial_skipped: list[dict] | None = None,
+        code_url_only: bool = False,
+        delimiter: str = "----",
+    ):
+        """导出通用 API 邮箱，可输出邮箱+URL或仅输出邮箱池原始URL。"""
+        from datetime import datetime as _dt
+
+        data = request.get_json(silent=True) or {}
+        archived = str(data.get("archived") or "0").strip().lower()
+        if accounts is None:
+            accounts = db.list_accounts(limit=100000, archived=archived, plan_filter=plan_filter)
+        lines = []
+        skipped = list(initial_skipped or [])
+        seen_emails = set()
+        seen_lines = set()
+        for account in sorted(accounts, key=lambda item: int(item.get("id") or 0)):
+            if not include_account(account):
+                continue
+            email = str(account.get("email") or "").strip()
+            email_key = email.lower()
+            if not email or email_key in seen_emails:
+                continue
+            seen_emails.add(email_key)
+            mailbox = db.get_generic_api_email_by_email(email)
+            code_url = str((mailbox or {}).get("code_url") or "").strip()
+            if not code_url:
+                skipped.append({
+                    "id": account.get("id"),
+                    "email": email,
+                    "reason": "通用 API 邮箱池中缺少取码地址",
+                })
+                continue
+            line = code_url if code_url_only else f"{email}{delimiter}{code_url}"
+            if line in seen_lines:
+                continue
+            seen_lines.add(line)
+            lines.append(line)
+
+        if not lines:
+            return jsonify({
+                "ok": False,
+                "error": empty_error,
+                "skipped": skipped,
+                "skipped_count": len(skipped),
+            }), 404
+
+        content = ("\n".join(lines) + "\n").encode("utf-8")
+        filename = f"{filename_prefix}-{_dt.now().strftime('%Y%m%d-%H%M%S')}.txt"
+        if bool(data.get("prepare")):
+            download_id = _put_prepared_download(content, filename, "text/plain")
+            return jsonify({
+                "ok": True,
+                "filename": filename,
+                "download_url": f"/api/downloads/{download_id}",
+                "exported_count": len(lines),
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+            })
+        return Response(
+            content,
+            mimetype="text/plain",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+                "X-Exported-Count": str(len(lines)),
+                "X-Skipped-Count": str(len(skipped)),
+            },
+        )
+
+    @app.post("/api/accounts/export-plus-trial-emails")
+    def api_accounts_export_plus_trial_emails():
+        """导出 free(可Plus试用) 账号对应的通用 API 邮箱。"""
+        return _export_account_emails(
+            plan_filter="free",
+            include_account=lambda account: bool(account.get("plus_trial_eligible")),
+            filename_prefix="plus-trial-emails",
+            empty_error="没有可导出的 free(可Plus试用) 通用 API 邮箱",
+        )
+
+    @app.post("/api/accounts/export-plus-emails")
+    def api_accounts_export_plus_emails():
+        """导出选中的已开通 Plus 账号及其邮箱池原始取码 URL。"""
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "请先选择要导出的已开通 Plus 账号"}), 400
+        if len(ids) > 5000:
+            return jsonify({"ok": False, "error": "单次最多导出 5000 个账号"}), 400
+
+        accounts = []
+        skipped = []
+        seen_ids = set()
+        for raw in ids:
+            try:
+                account_id = int(raw)
+            except (TypeError, ValueError):
+                skipped.append({"id": raw, "reason": "ID 非法"})
+                continue
+            if account_id in seen_ids:
+                continue
+            seen_ids.add(account_id)
+            account = db.get_account(account_id)
+            if not account:
+                skipped.append({"id": account_id, "reason": "账号不存在"})
+                continue
+            plan = str(account.get("current_plan_type") or account.get("plan_type") or "").strip().lower()
+            if "plus" not in plan or "free" in plan:
+                skipped.append({
+                    "id": account_id,
+                    "email": account.get("email"),
+                    "reason": "账号当前不是已开通 Plus 状态",
+                })
+                continue
+            accounts.append(account)
+
+        return _export_account_emails(
+            accounts=accounts,
+            include_account=lambda _account: True,
+            filename_prefix="plus-emails",
+            empty_error="选中的账号中没有可导出的已开通 Plus 取码地址",
+            initial_skipped=skipped,
+            delimiter="---",
+        )
 
     @app.get("/api/accounts/plan-check-status")
     def api_account_plan_check_status():
@@ -396,6 +546,13 @@ def create_app(auth_code: str | None = None) -> Flask:
     def api_account_extract_link():
         """单账号提链。Body {account_id|id, link_type?, cdk?}。"""
         data = request.get_json(silent=True) or {}
+        try:
+            extract_link_service.validate_settings(
+                link_type=data.get("link_type"),
+                cdk=data.get("cdk"),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
         acc_id = data.get("account_id") or data.get("id")
         try:
             acc = db.get_account(int(acc_id))
@@ -434,6 +591,13 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
         if len(ids) > 500:
             return jsonify({"ok": False, "error": "单次最多提链 500 个账号"}), 400
+        try:
+            extract_link_service.validate_settings(
+                link_type=data.get("link_type"),
+                cdk=data.get("cdk"),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
 
         started = []
         busy = []
@@ -827,6 +991,155 @@ def create_app(auth_code: str | None = None) -> Flask:
             },
         )
 
+    @app.post("/api/accounts/download-sub2")
+    def api_accounts_download_sub2():
+        """把选中账号聚合成 sub2api OAuth JSON，优先读取 CPA 完整凭证。"""
+        import json as _json
+        from datetime import datetime as _dt
+        from core.codex_oauth import (
+            download_cpa_codex_auth_text,
+            list_cpa_codex_auth_files,
+            match_cpa_codex_auth_file,
+        )
+        from core.sub2_export import build_sub2_export, build_sub2_oauth_account
+
+        data = request.get_json(silent=True) or {}
+        ids = data.get("account_ids") or data.get("ids") or []
+        if not isinstance(ids, list) or not ids:
+            return jsonify({"ok": False, "error": "account_ids 必须是非空数组"}), 400
+        if len(ids) > 1000:
+            return jsonify({"ok": False, "error": "单次最多导出 1000 个账号"}), 400
+
+        local_oauth_by_email: dict[str, tuple[dict, str, int]] = {}
+        local_filename_by_email: dict[str, str] = {}
+        for item in db.list_codex_accounts():
+            email_key = str(item.get("email") or "").strip().lower()
+            filename = str(item.get("filename") or "").strip()
+            if not email_key or not filename:
+                continue
+            local_filename_by_email.setdefault(email_key, filename)
+            try:
+                content, real_filename = db.read_codex_credential(filename)
+                credential = _json.loads(content)
+            except Exception:
+                continue
+            if not isinstance(credential, dict):
+                continue
+            score = sum(bool(credential.get(key)) for key in ("access_token", "refresh_token", "id_token"))
+            if score <= 0:
+                continue
+            previous = local_oauth_by_email.get(email_key)
+            if previous is None or score > previous[2]:
+                local_oauth_by_email[email_key] = (credential, real_filename, score)
+
+        cpa_files: list[dict] = []
+        cpa_files_loaded = False
+        entries = []
+        errors = []
+        partial_count = 0
+        seen = set()
+        for raw in ids:
+            try:
+                acc_id = int(raw)
+            except Exception:
+                errors.append({"id": raw, "error": "ID 非法"})
+                continue
+            if acc_id in seen:
+                continue
+            seen.add(acc_id)
+            account = db.get_account(acc_id)
+            if not account:
+                errors.append({"id": acc_id, "error": "账号不存在"})
+                continue
+
+            source = dict(account)
+            source_file = ""
+            email_key = str(account.get("email") or "").strip().lower()
+            local_filename = local_filename_by_email.get(email_key, "")
+            should_read_cpa = (
+                str(account.get("codex_status") or "").strip().lower() == "success"
+                or "-cpa-callback" in local_filename.lower()
+            )
+            if should_read_cpa:
+                if not cpa_files_loaded:
+                    cpa_files_loaded = True
+                    try:
+                        cpa_files = list_cpa_codex_auth_files()
+                    except Exception as exc:
+                        logger.warning("sub2 导出读取 CPA auth-files 失败，回退本地凭证：%s", exc)
+                        cpa_files = []
+                meta = match_cpa_codex_auth_file(
+                    cpa_files,
+                    email=str(account.get("email") or ""),
+                    local_filename=local_filename,
+                )
+                cpa_name = str((meta or {}).get("name") or "").strip()
+                if cpa_name:
+                    try:
+                        cpa_text, cpa_filename, _ = download_cpa_codex_auth_text(
+                            cpa_name=cpa_name,
+                        )
+                        cpa_credential = _json.loads(cpa_text)
+                        if not isinstance(cpa_credential, dict):
+                            raise ValueError("CPA 凭证不是 JSON 对象")
+                        source["oauth_credentials"] = cpa_credential
+                        source_file = cpa_filename
+                    except Exception as exc:
+                        logger.warning(
+                            "sub2 导出下载 CPA 凭证失败，回退本地凭证：email=%s error=%s",
+                            account.get("email"),
+                            exc,
+                        )
+
+            if not source_file:
+                local_oauth = local_oauth_by_email.get(email_key)
+                if local_oauth:
+                    source["oauth_credentials"] = local_oauth[0]
+                    source_file = local_oauth[1]
+            try:
+                entry = build_sub2_oauth_account(source, source_file=source_file)
+                entries.append(entry)
+                if not bool((entry.get("extra") or {}).get("cpa_ready")):
+                    partial_count += 1
+                if local_filename:
+                    db.mark_codex_exported(local_filename)
+            except Exception as exc:
+                errors.append({
+                    "id": acc_id,
+                    "email": account.get("email"),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+        if not entries:
+            return jsonify({"ok": False, "error": "没有可导出的 sub2 OAuth 账号", "errors": errors}), 404
+
+        result = build_sub2_export(entries)
+        content = (_json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        now = _dt.now()
+        filename = f"sub2api-account-{now.strftime('%Y%m%d%H%M%S')}.json"
+        if bool(data.get("prepare")):
+            download_id = _put_prepared_download(content, filename, "application/json")
+            return jsonify({
+                "ok": True,
+                "filename": filename,
+                "download_url": f"/api/downloads/{download_id}",
+                "account_count": len(entries),
+                "partial_count": partial_count,
+                "error_count": len(errors),
+                "errors": errors,
+            })
+        return Response(
+            content,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
+        )
+
     @app.post("/api/accounts/download-cpa-bulk")
     def api_accounts_download_cpa_bulk():
         """
@@ -837,7 +1150,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         import json as _json
         import zipfile
         from datetime import datetime as _dt
-        from core.codex_oauth import download_cpa_codex_auth_text, list_cpa_codex_auth_files
+        from core.codex_oauth import (
+            download_cpa_codex_auth_text,
+            list_cpa_codex_auth_files,
+            match_cpa_codex_auth_file,
+        )
 
         data = request.get_json(silent=True) or {}
         if not data and request.form:
@@ -857,33 +1174,6 @@ def create_app(auth_code: str | None = None) -> Flask:
             cpa_files = list_cpa_codex_auth_files()
         except Exception as exc:
             return jsonify({"ok": False, "error": f"读取 CPA auth-files 失败: {type(exc).__name__}: {exc}"}), 502
-
-        def _match_cpa_file(email: str, local_filename: str = "") -> dict | None:
-            """在已缓存的 CPA 文件列表中匹配，避免每个账号都重新请求 auth-files。"""
-            email_l = str(email or "").strip().lower()
-            local_name_l = str(local_filename or "").strip().lower()
-            local_stem_l = local_name_l[:-5] if local_name_l.endswith(".json") else local_name_l
-
-            def score(item: dict) -> int:
-                name_l = str(item.get("name") or "").lower()
-                item_email_l = str(item.get("email") or "").lower()
-                s = 0
-                if local_name_l and name_l == local_name_l:
-                    s = max(s, 100)
-                if local_stem_l and name_l.startswith(local_stem_l):
-                    s = max(s, 80)
-                if email_l and item_email_l == email_l:
-                    s = max(s, 70)
-                if email_l and email_l in name_l:
-                    s = max(s, 60)
-                if local_stem_l.endswith("-cpa-callback"):
-                    base = local_stem_l[:-len("-cpa-callback")]
-                    if base and name_l.startswith(base + "-"):
-                        s = max(s, 75)
-                return s
-
-            ranked = sorted(((score(item), item) for item in cpa_files), key=lambda x: x[0], reverse=True)
-            return ranked[0][1] if ranked and ranked[0][0] > 0 else None
 
         # 建立 email -> 本地 codex 文件名索引；有本地文件名时传给 CPA 匹配逻辑可提升命中率。
         local_by_email: dict[str, str] = {}
@@ -923,7 +1213,11 @@ def create_app(auth_code: str | None = None) -> Flask:
 
                 local_filename = local_by_email.get(email.lower(), "")
                 try:
-                    meta = _match_cpa_file(email=email, local_filename=local_filename)
+                    meta = match_cpa_codex_auth_file(
+                        cpa_files,
+                        email=email,
+                        local_filename=local_filename,
+                    )
                     cpa_name_hint = str((meta or {}).get("name") or "").strip()
                     if not cpa_name_hint:
                         raise RuntimeError(f"[Codex][CPA] 未在 CPA auth-files 中找到匹配的 Codex 凭证: {email}")
@@ -1016,7 +1310,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         """
         粘贴文本导入邮箱素材。
         Outlook：email----password----clientId----refreshToken
-        通用 API：email----code_url
+        通用 API：email----code_url，也兼容 email----password----code_url
         分隔符兼容 ---- 与 ====。
         """
         data = request.get_json(silent=True) or {}
@@ -1033,13 +1327,17 @@ def create_app(auth_code: str | None = None) -> Flask:
             parts = line.split("----") if "----" in line else line.split("====")
             parts = [p.strip() for p in parts]
             if source == "generic_api":
-                if len(parts) < 2:
+                url_index = next(
+                    (i for i, value in enumerate(parts[1:], start=1) if value.startswith(("http://", "https://"))),
+                    None,
+                )
+                if not parts[0] or url_index is None:
                     continue
                 records.append({
                     "email": parts[0],
-                    "code_url": parts[1],
-                    "access_token": parts[2] if len(parts) > 2 else "",
-                    "totp_secret": parts[3] if len(parts) > 3 else "",
+                    "code_url": parts[url_index],
+                    "access_token": parts[url_index + 1] if len(parts) > url_index + 1 else "",
+                    "totp_secret": parts[url_index + 2] if len(parts) > url_index + 2 else "",
                 })
                 continue
             if len(parts) < 4:
@@ -1053,7 +1351,20 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "totp_secret": parts[5] if len(parts) > 5 else "",
             })
         if not records:
-            need = "2 段：邮箱----取码地址" if source == "generic_api" else "4 段：email----password----clientId----refreshToken"
+            if source == "outlook" and any(
+                any(part.strip().startswith(("http://", "https://")) for part in raw.split("----")[1:])
+                for raw in text.splitlines()
+                if raw.strip()
+            ):
+                return jsonify({
+                    "ok": False,
+                    "error": "检测到取码 URL：这是通用 API 邮箱格式，请将「导入类型」切换为「通用 API 取码邮箱」后重试。",
+                }), 400
+            need = (
+                "2/3 段：邮箱----[密码----]取码地址"
+                if source == "generic_api"
+                else "4 段：email----password----clientId----refreshToken"
+            )
             return jsonify({"ok": False, "error": f"未解析到有效邮箱行（需 {need}，---- 或 ==== 分隔）"}), 400
         if as_registered:
             inserted, skipped = db.import_registered_email_accounts(records, source=source)
@@ -1407,6 +1718,128 @@ def create_app(auth_code: str | None = None) -> Flask:
             _json.dumps(result, ensure_ascii=False, indent=2),
             mimetype="application/json",
             headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+        )
+
+    @app.post("/api/codex/download-sub2")
+    def api_codex_download_sub2():
+        """把选中的本地 Codex 记录转换为 sub2api OAuth 聚合 JSON。"""
+        import json as _json
+        from datetime import datetime as _dt
+        from core.codex_oauth import (
+            download_cpa_codex_auth_text,
+            list_cpa_codex_auth_files,
+            match_cpa_codex_auth_file,
+        )
+        from core.sub2_export import build_sub2_export, build_sub2_oauth_account
+
+        data = request.get_json(silent=True) or {}
+        filenames = data.get("filenames") or []
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        if len(filenames) > 1000:
+            return jsonify({"ok": False, "error": "单次最多 1000 个"}), 400
+
+        entries = []
+        errors = []
+        partial_count = 0
+        seen = set()
+        cpa_files: list[dict] = []
+        cpa_files_loaded = False
+        cpa_files_error = ""
+
+        for raw_filename in filenames:
+            filename = str(raw_filename or "").strip()
+            if not filename or filename in seen:
+                continue
+            seen.add(filename)
+            try:
+                content, local_filename = db.read_codex_credential(filename)
+                local_credential = _json.loads(content)
+                if not isinstance(local_credential, dict):
+                    raise ValueError("本地凭证不是 JSON 对象")
+
+                email = str(local_credential.get("email") or "").strip()
+                credential = local_credential
+                source_file = local_filename
+                local_score = sum(
+                    bool(local_credential.get(key))
+                    for key in ("access_token", "refresh_token", "id_token")
+                )
+
+                if local_score < 3:
+                    if not cpa_files_loaded:
+                        cpa_files_loaded = True
+                        try:
+                            cpa_files = list_cpa_codex_auth_files()
+                        except Exception as exc:
+                            cpa_files_error = f"{type(exc).__name__}: {exc}"
+                            cpa_files = []
+                    meta = match_cpa_codex_auth_file(
+                        cpa_files,
+                        email=email,
+                        local_filename=local_filename,
+                    )
+                    cpa_name = str((meta or {}).get("name") or "").strip()
+                    if cpa_name:
+                        cpa_text, cpa_filename, _ = download_cpa_codex_auth_text(
+                            cpa_name=cpa_name,
+                        )
+                        downloaded = _json.loads(cpa_text)
+                        if not isinstance(downloaded, dict):
+                            raise ValueError("CPA 凭证不是 JSON 对象")
+                        credential = downloaded
+                        source_file = cpa_filename
+                    elif not local_credential.get("access_token"):
+                        detail = f": {cpa_files_error}" if cpa_files_error else ""
+                        raise RuntimeError(f"本地回执缺少 token，CPA 未找到匹配凭证{detail}")
+
+                source = dict(local_credential)
+                source["oauth_credentials"] = credential
+                if email and not source.get("email"):
+                    source["email"] = email
+                entry = build_sub2_oauth_account(source, source_file=source_file)
+                entries.append(entry)
+                if not bool((entry.get("extra") or {}).get("cpa_ready")):
+                    partial_count += 1
+                db.mark_codex_exported(local_filename)
+            except Exception as exc:
+                errors.append({
+                    "filename": filename or str(raw_filename),
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+
+        if not entries:
+            return jsonify({
+                "ok": False,
+                "error": "没有可导出的 sub2 OAuth 账号",
+                "errors": errors,
+            }), 502
+
+        result = build_sub2_export(entries)
+        content = (_json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
+        now = _dt.now()
+        download_name = f"sub2api-codex-{now.strftime('%Y%m%d%H%M%S')}.json"
+        if bool(data.get("prepare")):
+            download_id = _put_prepared_download(content, download_name, "application/json")
+            return jsonify({
+                "ok": True,
+                "filename": download_name,
+                "download_url": f"/api/downloads/{download_id}",
+                "account_count": len(entries),
+                "partial_count": partial_count,
+                "error_count": len(errors),
+                "errors": errors,
+            })
+        return Response(
+            content,
+            mimetype="application/json",
+            headers={
+                "Content-Disposition": f'attachment; filename="{download_name}"',
+                "Content-Length": str(len(content)),
+                "Cache-Control": "no-store, max-age=0",
+                "Pragma": "no-cache",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/codex/reset-export")

@@ -460,12 +460,16 @@ def list_cpa_codex_auth_files() -> list[dict]:
     return out
 
 
-def find_cpa_codex_auth_file(*, email: str = "", local_filename: str = "") -> dict | None:
-    """按本地回执/凭证文件名或邮箱匹配 CPA 侧 codex auth 文件。"""
+def match_cpa_codex_auth_file(
+    files: list[dict],
+    *,
+    email: str = "",
+    local_filename: str = "",
+) -> dict | None:
+    """从已读取的 CPA 文件列表中按本地文件名或邮箱匹配 Codex 凭证。"""
     email_l = str(email or "").strip().lower()
     local_name_l = str(local_filename or "").strip().lower()
     local_stem_l = local_name_l[:-5] if local_name_l.endswith(".json") else local_name_l
-    files = list_cpa_codex_auth_files()
     if not files:
         return None
 
@@ -490,6 +494,15 @@ def find_cpa_codex_auth_file(*, email: str = "", local_filename: str = "") -> di
 
     ranked = sorted(((score(item), item) for item in files), key=lambda x: x[0], reverse=True)
     return ranked[0][1] if ranked and ranked[0][0] > 0 else None
+
+
+def find_cpa_codex_auth_file(*, email: str = "", local_filename: str = "") -> dict | None:
+    """按本地回执/凭证文件名或邮箱匹配 CPA 侧 codex auth 文件。"""
+    return match_cpa_codex_auth_file(
+        list_cpa_codex_auth_files(),
+        email=email,
+        local_filename=local_filename,
+    )
 
 
 def download_cpa_codex_auth_text(*, cpa_name: str | None = None, email: str = "", local_filename: str = "") -> tuple[str, str, dict]:

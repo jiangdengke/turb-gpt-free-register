@@ -542,15 +542,15 @@ EDITABLE_FIELDS = [
 
     {
         "key": "SMS_PROVIDER", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "接码通道", "help": "grizzly / l / h；l 使用 L_API.md，h 使用 H_API.md 定义的本地取号服务",
+        "label": "接码通道", "help": "grizzly / sms_activate / l / h；sms_activate 使用 SMS Activation Service",
     },
     {
         "key": "SMS_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "国家代码", "help": "传给接码平台的 country；GrizzlySMS 常用：美国=187；H 通道作为 H_API.md 的 country",
+        "label": "国家代码", "help": "传给接码平台的 country；sms_activate 常用：美国实体号=187、日本=670",
     },
     {
         "key": "SMS_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "服务/项目代码", "help": "GrizzlySMS/L 作为 service；H 通道作为 H_API.md 的 projectId",
+        "label": "服务/项目代码", "help": "GrizzlySMS/sms_activate/L 作为 service；ChatGPT 填 dr；H 通道作为 projectId",
     },
     {
         "key": "SMS_MAX_RETRIES", "file": "codex.py", "type": "int", "group": "接码平台",
@@ -564,6 +564,27 @@ EDITABLE_FIELDS = [
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
         "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMS_ACTIVATE_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMS Activate API地址", "help": "默认 https://sms-verification-number.com/stubs/handler_api",
+    },
+    {
+        "key": "SMS_ACTIVATE_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMS Activate API密钥", "help": "在平台个人资料页获取，保存在 .env",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "SMS_ACTIVATE_LANG", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMS Activate语言", "help": "平台必填参数，仅支持 en 或 ru；余额为美元时使用 en",
+    },
+    {
+        "key": "SMS_ACTIVATE_SERVICE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMS Activate服务代码", "help": "ChatGPT (openAI.com) 填 dr",
+    },
+    {
+        "key": "SMS_ACTIVATE_COUNTRY", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "SMS Activate国家代码", "help": "美国实体号填 187；日本填 670",
     },
     {
         "key": "H_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",

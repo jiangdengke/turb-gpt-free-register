@@ -266,11 +266,18 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
         logger.info("[CodexAgent] 生成成功: %s runtime=%s", email, result.get("agent_runtime_id") or "-")
         return result
     except Exception as exc:
+        unsupported = getattr(exc, "code", "") == "agent_registry_not_enabled"
+        error_text = f"{type(exc).__name__}: {str(exc)[:300]}"
         result = {
             "ok": False,
-            "status": "failed",
+            "status": "unsupported" if unsupported else "failed",
             "checked_at": datetime.now().isoformat(timespec="seconds"),
-            "error": f"{type(exc).__name__}: {str(exc)[:300]}",
+            "error": error_text,
+            "message": (
+                "该账号未开放 Agent Registry；Codex OAuth 文件请使用“补跑”生成"
+                if unsupported
+                else f"生成失败：{error_text}"
+            ),
             "network_route": route_meta.get("network_route"),
             "proxy_mode": route_meta.get("proxy_mode"),
             "proxy_used": route_meta.get("proxy_used"),
@@ -285,7 +292,10 @@ def _run_generate(*, account_id: int, email: str, access_token: str, trigger: st
             db.update_account_codex_agent(account_id, result)
         except Exception:
             logger.exception("[CodexAgent] 写入失败状态异常: account_id=%s", account_id)
-        logger.exception("[CodexAgent] 生成失败: %s", email)
+        if unsupported:
+            logger.warning("[CodexAgent] 账号未开放 Agent Registry: %s", email)
+        else:
+            logger.exception("[CodexAgent] 生成失败: %s", email)
         return result
     finally:
         if env is not None:

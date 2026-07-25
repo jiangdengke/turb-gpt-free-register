@@ -12,6 +12,7 @@
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from datetime import datetime
 from html import escape
@@ -514,10 +515,33 @@ def _find_by_email(rows: list[dict], email: str) -> dict | None:
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
 
 
+def _extract_link_expiry_timestamp(value) -> float | None:
+    """把提链服务返回的秒/毫秒时间戳或 ISO 时间转换为 Unix 秒。"""
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw:
+        return None
+    try:
+        timestamp = float(raw)
+        if timestamp > 1_000_000_000_000:
+            timestamp /= 1000
+        return timestamp if timestamp > 0 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        normalized = raw[:-1] + "+00:00" if raw.endswith(("Z", "z")) else raw
+        return datetime.fromisoformat(normalized).timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
 def _decorate_account(row: dict) -> dict:
     out = dict(row)
     out["note"] = out.get("note") or ""
     out["note_updated_at"] = out.get("note_updated_at") or ""
+    extract_expiry = _extract_link_expiry_timestamp(out.get("extract_link_expires_at"))
+    out["extract_link_expired"] = bool(extract_expiry is not None and time.time() >= extract_expiry)
     plan_status = out.get("plan_check_status")
     if plan_status in {"queued", "running"}:
         try:
@@ -537,7 +561,7 @@ def _decorate_account(row: dict) -> dict:
 
 
 def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> bool:
-    """账号套餐过滤。plus 表示已开通 Plus（兼容 plus/chatgpt_plus/plus_trial 等标记）。"""
+    """账号套餐过滤。plus_trial 表示 free 且具备 Plus 试用资格。"""
     f = str(plan_filter or "").strip().lower()
     if not f or f in {"all", "any"}:
         return True
@@ -546,6 +570,8 @@ def _account_matches_plan_filter(row: dict, plan_filter: str | None = None) -> b
         # “free(可Plus试用)”/plus_trial_eligible 只是可试用，不算已开通 Plus。
         # 只有套餐字段本身是 Plus/ChatGPT Plus/plus_* 且不含 free 时才命中。
         return "plus" in plan and "free" not in plan
+    if f in {"plus_trial", "trial_eligible"}:
+        return plan == "free" and bool(row.get("plus_trial_eligible"))
     if f == "free":
         return plan == "free"
     return plan == f
@@ -754,7 +780,7 @@ def update_account_codex_agent(acc_id: int, result: dict | None = None) -> bool:
         row["codex_agent_status"] = status
         row["codex_agent_ok"] = ok
         row["codex_agent_checked_at"] = result.get("checked_at") or _now()
-        if status in {"success", "failed", "stopped"}:
+        if status in {"success", "failed", "unsupported", "stopped"}:
             row["codex_agent_completed_at"] = _now()
         row["codex_agent_error"] = None if ok or status == "running" else result.get("error")
         if result.get("message") is not None:
@@ -1084,7 +1110,7 @@ def list_account_plan_check_statuses(limit: int = 5000, archived: str | bool | N
         "extract_link_job_id", "extract_link_message", "extract_link_error",
         "extract_link_long_url", "extract_link_copy_paste",
         "extract_link_image_url_png", "extract_link_image_url_svg",
-        "extract_link_expires_at", "extract_link_payment_method",
+        "extract_link_expires_at", "extract_link_expired", "extract_link_payment_method",
         "extract_link_payment_link_type",
         "extract_link_checked_at", "extract_link_completed_at",
         "codex_agent_status", "codex_agent_ok", "codex_agent_message",
@@ -1110,7 +1136,8 @@ def list_account_plan_check_statuses(limit: int = 5000, archived: str | bool | N
         for row in rows:
             items.append({key: row.get(key) for key in fields})
         latest = max((str(row.get("updated_at") or "") for row in rows), default="")
-        return {"items": items, "revision": f"{len(rows)}:{latest}"}
+        expired_count = sum(bool(row.get("extract_link_expired")) for row in rows)
+        return {"items": items, "revision": f"{len(rows)}:{latest}:expired={expired_count}"}
 
 
 def list_accounts(limit: int = 500, offset: int = 0, archived: str | bool | None = False, plan_filter: str | None = None) -> list[dict]:
@@ -1949,6 +1976,75 @@ def get_job(job_id: int) -> dict | None:
     with _LOCK:
         row = next((r for r in _load_jobs() if int(r.get("id") or 0) == int(job_id)), None)
         return dict(row) if row else None
+
+
+def recover_interrupted_registration_jobs() -> dict[str, int]:
+    """结束因进程重启遗留的注册任务，并回收其中尚未生成账号的邮箱。"""
+    active_states = {"pending", "running", "stopping"}
+    now = _now()
+    reason = "WebUI 重启导致注册任务中断"
+    note = "任务因 WebUI 重启中断，确认未生成账号后已自动回收"
+
+    with _LOCK:
+        jobs = _load_jobs()
+        interrupted = [
+            row
+            for row in jobs
+            if str(row.get("job_type") or "registration") == "registration"
+            and row.get("status") in active_states
+        ]
+        if not interrupted:
+            return {"jobs": 0, "emails": 0}
+
+        account_emails = {
+            str(row.get("email") or "").strip().lower()
+            for row in _load_accounts()
+            if str(row.get("email") or "").strip()
+        }
+        outlook_rows = _load_outlook()
+        generic_rows = _load_generic_api_emails()
+        domain_rows = _load_domain_pool()
+        released_emails: set[str] = set()
+        outlook_changed = generic_changed = domain_changed = False
+
+        for job in interrupted:
+            job["status"] = "failed"
+            job["completed_at"] = now
+            job["error_message"] = reason
+
+            email = str(job.get("email") or "").strip()
+            email_key = email.lower()
+            if not email_key or email_key in account_emails or email_key in released_emails:
+                continue
+
+            for rows, pool_name in (
+                (outlook_rows, "outlook"),
+                (generic_rows, "generic"),
+                (domain_rows, "domain"),
+            ):
+                pool_row = _find_by_email(rows, email)
+                if pool_row is None or pool_row.get("status") != "used":
+                    continue
+                pool_row["status"] = "available"
+                pool_row["used_at"] = None
+                pool_row["note"] = note
+                released_emails.add(email_key)
+                if pool_name == "outlook":
+                    outlook_changed = True
+                elif pool_name == "generic":
+                    generic_changed = True
+                else:
+                    domain_changed = True
+                break
+
+        _save_jobs(jobs)
+        if outlook_changed:
+            _save_outlook(outlook_rows)
+        if generic_changed:
+            _save_generic_api_emails(generic_rows)
+        if domain_changed:
+            _save_domain_pool(domain_rows)
+        return {"jobs": len(interrupted), "emails": len(released_emails)}
 
 
 def get_successful_retry_for_job(job_id: int) -> dict | None:

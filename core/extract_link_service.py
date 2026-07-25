@@ -68,6 +68,18 @@ def _cdk(value: str | None = None) -> str:
     return cdk
 
 
+def validate_settings(*, link_type: str | None = None, cdk: str | None = None) -> None:
+    """在任务入队前一次性报告缺失配置，避免批量接口只返回失败数量。"""
+    missing: list[str] = []
+    if not str(_runtime_setting("EXTRACT_LINK_API_BASE", "") or "").strip():
+        missing.append("EXTRACT_LINK_API_BASE")
+    if not str(cdk or _runtime_setting("EXTRACT_LINK_CDK", "") or "").strip():
+        missing.append("EXTRACT_LINK_CDK")
+    if missing:
+        raise ValueError(f"提链配置缺失：{'、'.join(missing)}")
+    _link_type(link_type)
+
+
 _WORKERS = _int_setting("EXTRACT_LINK_WORKERS", 3, 1, 16)
 _QUEUE_LIMIT = _int_setting("EXTRACT_LINK_QUEUE_LIMIT", 500, _WORKERS, 5000)
 _EXECUTOR = ThreadPoolExecutor(max_workers=_WORKERS, thread_name_prefix="extract-link")
@@ -329,6 +341,7 @@ def enqueue_account_extract(*, account_id: int, email: str, access_token: str, t
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "提链队列已满"}
     try:
+        validate_settings(link_type=link_type, cdk=cdk)
         lt = _link_type(link_type)
         code = _cdk(cdk)
         if not db.claim_account_extract(account_id, trigger=trigger, link_type=lt):

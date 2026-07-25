@@ -283,9 +283,8 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
             continue
         used_codes.add(str(code))
         logger.info("[Codex][Browser] 邮箱 OTP 收到：%s", code)
-        _clear_otp_inputs(driver)
-        _type_otp(driver, code)
-        logger.info("[Codex][Browser] 已填写邮箱 OTP")
+        _type_email_otp_verified(driver, code)
+        logger.info("[Codex][Browser] 已填写邮箱 OTP 并回读校验通过")
         human_delay("otp_input")
         _install_email_otp_validate_hook(driver)
         clicked = _click_if_present(driver, [
@@ -320,6 +319,65 @@ def _fill_email_and_otp(driver, email: str, otp_provider, auth_url: str) -> None
 
 
 
+def _otp_values_match(state: dict, code: str) -> bool:
+    values: list[str] = []
+    for item in state.get("inputs") or []:
+        attrs = " ".join(
+            str(item.get(key) or "")
+            for key in ("type", "name", "id", "autocomplete", "inputmode")
+        ).lower()
+        if any(marker in attrs for marker in ("one-time", "otp", "code", "numeric", "tel")):
+            values.append(str(item.get("value") or ""))
+    if len(values) == 1:
+        return values[0] == str(code)
+    return bool(values) and "".join(values[:len(str(code))]) == str(code)
+
+
+def _type_email_otp_verified(driver, code: str) -> None:
+    """Write the email OTP and verify the browser actually holds all six digits."""
+    _clear_otp_inputs(driver)
+    _type_otp(driver, code)
+    state = _email_otp_page_state(driver)
+    if _otp_values_match(state, code):
+        return
+
+    logger.warning(
+        "[Codex][Browser] Selenium 写入邮箱 OTP 后回读不一致，使用原生 input 事件重填：values=%s",
+        [str(item.get("value") or "") for item in (state.get("inputs") or [])],
+    )
+    written = driver.execute_script(
+        r"""
+        const code = String(arguments[0] || '');
+        const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+        const inputs = [...document.querySelectorAll('input')].filter(visible).filter(el => {
+          const attrs = [el.type, el.name, el.id, el.autocomplete, el.inputMode, el.getAttribute('aria-label')]
+            .join(' ').toLowerCase();
+          return /one-time|otp|code|numeric|tel/.test(attrs);
+        });
+        if (!inputs.length) return [];
+        const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+        const values = inputs.length === 1 ? [code] : [...code];
+        inputs.forEach((el, index) => {
+          const value = values[index] || '';
+          if (setter) setter.call(el, value); else el.value = value;
+          el.dispatchEvent(new InputEvent('input', {
+            bubbles: true, inputType: 'insertText', data: value
+          }));
+          el.dispatchEvent(new Event('change', {bubbles: true}));
+        });
+        return inputs.map(el => el.value || '');
+        """,
+        str(code),
+    )
+    state = _email_otp_page_state(driver)
+    if not _otp_values_match(state, code):
+        raise RuntimeError(
+            "邮箱 OTP 写入校验失败: "
+            f"expected={code}, script_values={written}, "
+            f"page_values={[str(item.get('value') or '') for item in (state.get('inputs') or [])]}"
+        )
+
+
 def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_codes: set[str] | None = None, timeout: int = 90) -> str:
     """获取一个未提交过的邮箱 OTP。
 
@@ -333,6 +391,17 @@ def _wait_for_fresh_email_otp(otp_provider, email: str, after_ts: float, used_co
         code = str(otp_provider(email, after_ts=after_ts) or "").strip()
         if code and code not in used_codes:
             return code
+        if code:
+            try:
+                from core.generic_api_mail_client import is_fresh_otp
+                if is_fresh_otp(email, code, after_ts):
+                    logger.info(
+                        "[Codex][Browser] 新邮件复用了已提交过的 OTP=%s，邮件时间属于本轮，继续提交",
+                        code,
+                    )
+                    return code
+            except Exception as exc:
+                logger.debug("[Codex][Browser] 校验通用邮箱邮件时间失败：%s", str(exc)[:160])
         last_code = code or last_code
         remaining = int(end - time.time())
         if remaining <= 0:

@@ -39,6 +39,15 @@ class WebUiAuthTests(unittest.TestCase):
         r = self.client.get("/api/summary")
         self.assertEqual(r.status_code, 200)
 
+    def test_homepage_hides_telegram_link_and_keeps_logout(self):
+        r = self.client.get("/", headers={"X-Auth-Code": "test-auth"})
+        html = r.get_data(as_text=True)
+
+        self.assertEqual(r.status_code, 200)
+        self.assertNotIn("TG 交流群", html)
+        self.assertNotIn("t.me/", html)
+        self.assertIn('action="/logout"', html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -9,6 +9,9 @@ from pathlib import Path
 from core import db
 
 logger = logging.getLogger(__name__)
+# Gunicorn 默认可能把根日志级别设为 WARNING。补跑日志依赖 INFO 展示阶段进度，
+# 因此单独开启本服务的 INFO，不扩大其他模块的全局日志量。
+logger.setLevel(logging.INFO)
 
 _LOG_DIR = Path(__file__).resolve().parent.parent / "注册日志"
 _RETRYING: set[str] = set()
@@ -16,6 +19,18 @@ _RETRYING_LOCK = threading.Lock()
 _STOP_REQUESTED: set[str] = set()
 _RUNNING_THREADS: dict[str, int] = {}
 _RESERVED_AT: dict[str, float] = {}
+# importlib.reload 不是线程安全操作。批量补跑时必须串行完成运行时导入和配置重载，
+# 否则多个 worker 可能长时间卡在启动阶段，日志只剩“等待线程执行”。
+_RUNTIME_SETUP_LOCK = threading.Lock()
+_PROGRESS_LOGGER_NAMES = (
+    "core.codex_oauth",
+    "core.roxy_codex_oauth",
+    "core.browser_use_codex_oauth",
+    "core.skyvern_codex_oauth",
+    "core.cloakbrowser_driver",
+    "core.sms_provider",
+    "core.email_provider",
+)
 
 
 class CodexRetryStopped(Exception):
@@ -180,8 +195,6 @@ def run_worker(
             _RESERVED_AT[key] = time.time()
         check_stop_requested(email)
 
-        from core.codex_oauth import run_codex_oauth
-
         path = Path(target_log_path) if target_log_path else log_path(email)
         path.parent.mkdir(parents=True, exist_ok=True)
         if clear_log:
@@ -196,20 +209,35 @@ def run_worker(
         ))
         fh.addFilter(lambda record: record.threadName == thread_name)
         root_logger.addHandler(fh)
+        logger.info("[Codex 补跑] 线程已启动，正在加载运行时配置：%s", email)
+        for logger_name in _PROGRESS_LOGGER_NAMES:
+            logging.getLogger(logger_name).setLevel(logging.INFO)
 
-        try:
-            import config as config_pkg
-            config_pkg.reload_all()
-            from config import codex as codex_cfg
-            from config import roxybrowser as roxy_cfg
-            logger.info(
-                "[Codex 补跑] 已热加载配置：CODEX_OAUTH_DRIVER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s",
-                getattr(codex_cfg, "CODEX_OAUTH_DRIVER", ""),
-                getattr(roxy_cfg, "ROXY_OPEN_HEADLESS", ""),
-                getattr(roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", ""),
-            )
-        except Exception as exc:
-            logger.warning("[Codex 补跑] 配置热加载失败，将继续使用当前内存配置：%s: %s", type(exc).__name__, exc)
+        with _RUNTIME_SETUP_LOCK:
+            from core.codex_oauth import run_codex_oauth
+
+            try:
+                import config as config_pkg
+                config_pkg.reload_all()
+                from config import codex as codex_cfg
+                from config import roxybrowser as roxy_cfg
+                logger.info(
+                    "[Codex 补跑] 已热加载配置：CODEX_OAUTH_DRIVER=%s "
+                    "CODEX_AUTH_URL_SOURCE=%s CPA_MANAGEMENT_URL=%s "
+                    "SMS_PROVIDER=%s ROXY_OPEN_HEADLESS=%s ROXY_KEEP_BROWSER_OPEN=%s",
+                    getattr(codex_cfg, "CODEX_OAUTH_DRIVER", ""),
+                    getattr(codex_cfg, "CODEX_AUTH_URL_SOURCE", ""),
+                    getattr(codex_cfg, "CPA_MANAGEMENT_URL", ""),
+                    getattr(codex_cfg, "SMS_PROVIDER", ""),
+                    getattr(roxy_cfg, "ROXY_OPEN_HEADLESS", ""),
+                    getattr(roxy_cfg, "ROXY_KEEP_BROWSER_OPEN", ""),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[Codex 补跑] 配置热加载失败，将继续使用当前内存配置：%s: %s",
+                    type(exc).__name__,
+                    exc,
+                )
 
         if batch_label:
             logger.info("[Codex 补跑] 批量任务：%s", batch_label)
