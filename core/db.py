@@ -9,7 +9,10 @@
     - 用于注册的邮箱.json     Outlook 账号池完整状态
     - 注册成功的邮箱.json     注册成功账号完整状态
 """
+import hashlib
+import hmac
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -18,6 +21,7 @@ from datetime import datetime
 from html import escape
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 _DATA_DIR = _PROJECT_ROOT
@@ -39,6 +43,9 @@ _CODEX_DIR = _PROJECT_ROOT / "codex_accounts"
 # 导出状态单独存：{ "codex-邮箱-plan.json": {"exported_at": "...", "exported_count": N} }
 # 不污染 CPA 兼容的原文件
 _CODEX_EXPORT_STATE = _PROJECT_ROOT / "codex_导出状态.json"
+_SCANNERS_JSON = _PROJECT_ROOT / "扫码员.json"
+_SCAN_TASKS_JSON = _PROJECT_ROOT / "扫码任务.json"
+_SCAN_LEASE_SECONDS = 600
 
 _LEGACY_SQLITE = _LEGACY_DATA_DIR / "registrations.db"
 _LEGACY_OUTLOOK_JSON = _LEGACY_DATA_DIR / "outlook_accounts.json"
@@ -510,6 +517,24 @@ def _save_jobs(rows: list[dict]) -> None:
     _write_json(_JOBS_JSON, rows)
 
 
+def _load_scanners() -> list[dict]:
+    rows = _read_json(_SCANNERS_JSON, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _save_scanners(rows: list[dict]) -> None:
+    _write_json(_SCANNERS_JSON, rows)
+
+
+def _load_scan_tasks() -> list[dict]:
+    rows = _read_json(_SCAN_TASKS_JSON, [])
+    return rows if isinstance(rows, list) else []
+
+
+def _save_scan_tasks(rows: list[dict]) -> None:
+    _write_json(_SCAN_TASKS_JSON, rows)
+
+
 def _find_by_email(rows: list[dict], email: str) -> dict | None:
     target = (email or "").lower()
     return next((r for r in rows if (r.get("email") or "").lower() == target), None)
@@ -534,6 +559,224 @@ def _extract_link_expiry_timestamp(value) -> float | None:
         return datetime.fromisoformat(normalized).timestamp()
     except (TypeError, ValueError):
         return None
+
+
+def _scanner_key_hash(key: str) -> str:
+    return hashlib.sha256(f"scanner-key:{key}".encode("utf-8")).hexdigest()
+
+
+def _new_scanner_key() -> str:
+    return f"scan_{secrets.token_urlsafe(24)}"
+
+
+def _public_scanner(row: dict) -> dict:
+    return {
+        "id": int(row.get("id") or 0),
+        "name": row.get("name") or "",
+        "enabled": bool(row.get("enabled")),
+        "key_version": int(row.get("key_version") or 1),
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+        "last_login_at": row.get("last_login_at"),
+    }
+
+
+def _task_event(task: dict, action: str, *, scanner_id: int | None = None, detail: str = "") -> None:
+    events = task.setdefault("events", [])
+    events.append({
+        "at": _now(),
+        "action": str(action),
+        "scanner_id": int(scanner_id) if scanner_id is not None else None,
+        "detail": str(detail or ""),
+    })
+    if len(events) > 100:
+        del events[:-100]
+
+
+def _account_is_plus(row: dict) -> bool:
+    plan = str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
+    return "plus" in plan and "free" not in plan
+
+
+def _account_has_scannable_link(row: dict) -> bool:
+    plan = str(row.get("current_plan_type") or row.get("plan_type") or "").strip().lower()
+    return (
+        row.get("extract_link_status") == "success"
+        and bool(row.get("extract_link_ok"))
+        and plan == "free"
+        and bool(row.get("plus_trial_eligible"))
+        and bool(
+            row.get("extract_link_image_url_png")
+            or row.get("extract_link_image_url_svg")
+            or row.get("extract_link_long_url")
+            or row.get("extract_link_copy_paste")
+        )
+    )
+
+
+def _scan_link_fingerprint(row: dict) -> str:
+    raw = json.dumps({
+        "job_id": row.get("extract_link_job_id"),
+        "completed_at": row.get("extract_link_completed_at"),
+        "long_url": row.get("extract_link_long_url"),
+        "copy_paste": row.get("extract_link_copy_paste"),
+        "image_url_png": row.get("extract_link_image_url_png"),
+        "image_url_svg": row.get("extract_link_image_url_svg"),
+        "expires_at": row.get("extract_link_expires_at"),
+    }, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _safe_scan_url(value, allowed_schemes: set[str]) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    try:
+        return raw if urlparse(raw).scheme.lower() in allowed_schemes else ""
+    except (TypeError, ValueError):
+        return ""
+
+
+def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
+    """根据账号的最新提链/套餐状态更新扫码任务，调用方必须持有 _LOCK。"""
+    changed = False
+    now_ts = time.time()
+    account_by_id = {int(row.get("id") or 0): row for row in accounts}
+
+    for task in tasks:
+        account = account_by_id.get(int(task.get("account_id") or 0))
+        status = str(task.get("status") or "")
+        if account is None and status in {"pending", "claimed"}:
+            task["status"] = "superseded"
+            task["scanner_id"] = None
+            task["lease_expires_at"] = None
+            task["updated_at"] = _now()
+            _task_event(task, "superseded", detail="账号已不存在")
+            changed = True
+            continue
+        if account is None:
+            continue
+        if _account_is_plus(account) and status not in {"completed", "superseded"}:
+            task["status"] = "completed"
+            task["completed_at"] = _now()
+            task["lease_expires_at"] = None
+            task["updated_at"] = _now()
+            _task_event(task, "completed", detail="账号套餐已变更为 Plus")
+            changed = True
+            continue
+        if status == "claimed":
+            lease_ts = float(task.get("lease_expires_at") or 0)
+            if lease_ts and lease_ts <= now_ts:
+                scanner_id = task.get("scanner_id")
+                task["status"] = "pending"
+                task["scanner_id"] = None
+                task["claimed_at"] = None
+                task["lease_expires_at"] = None
+                task["updated_at"] = _now()
+                _task_event(task, "lease_expired", scanner_id=scanner_id)
+                changed = True
+                status = "pending"
+        if status in {"pending", "claimed"}:
+            expires_ts = float(task.get("link_expires_ts") or 0)
+            if expires_ts and expires_ts <= now_ts:
+                scanner_id = task.get("scanner_id")
+                task["status"] = "expired"
+                task["scanner_id"] = None
+                task["lease_expires_at"] = None
+                task["updated_at"] = _now()
+                _task_event(task, "expired", scanner_id=scanner_id)
+                changed = True
+
+    for account in accounts:
+        if not _account_has_scannable_link(account):
+            continue
+        expires_ts = _extract_link_expiry_timestamp(account.get("extract_link_expires_at"))
+        if expires_ts is not None and expires_ts <= now_ts:
+            continue
+        account_id = int(account.get("id") or 0)
+        fingerprint = _scan_link_fingerprint(account)
+        same_task = next((
+            task for task in tasks
+            if int(task.get("account_id") or 0) == account_id
+            and task.get("link_fingerprint") == fingerprint
+        ), None)
+        if same_task is not None:
+            continue
+        for task in tasks:
+            if (
+                int(task.get("account_id") or 0) == account_id
+                and task.get("status") in {"pending", "claimed"}
+            ):
+                scanner_id = task.get("scanner_id")
+                task["status"] = "superseded"
+                task["scanner_id"] = None
+                task["lease_expires_at"] = None
+                task["updated_at"] = _now()
+                _task_event(task, "superseded", scanner_id=scanner_id, detail="账号生成了新的支付链接")
+                changed = True
+        now = _now()
+        task = {
+            "id": _next_id(tasks),
+            "account_id": account_id,
+            "link_fingerprint": fingerprint,
+            "status": "pending",
+            "scanner_id": None,
+            "claimed_at": None,
+            "lease_expires_at": None,
+            "scanned_at": None,
+            "completed_at": None,
+            "link_expires_at": account.get("extract_link_expires_at"),
+            "link_expires_ts": expires_ts,
+            "created_at": now,
+            "updated_at": now,
+            "events": [],
+        }
+        _task_event(task, "created")
+        tasks.append(task)
+        changed = True
+    return changed
+
+
+def _decorate_scan_task(
+    task: dict,
+    account: dict | None,
+    scanner_by_id: dict[int, dict],
+    *,
+    reveal_link: bool = False,
+) -> dict:
+    email = str((account or {}).get("email") or "")
+    local, sep, domain = email.partition("@")
+    masked_email = email
+    if sep and len(local) > 2:
+        masked_email = f"{local[:2]}{'*' * min(6, max(2, len(local) - 2))}@{domain}"
+    scanner = scanner_by_id.get(int(task.get("scanner_id") or 0))
+    out = {
+        "id": int(task.get("id") or 0),
+        "account_id": int(task.get("account_id") or 0),
+        "email": email if reveal_link else masked_email,
+        "status": task.get("status"),
+        "scanner_id": task.get("scanner_id"),
+        "scanner_name": scanner.get("name") if scanner else "",
+        "claimed_at": task.get("claimed_at"),
+        "lease_expires_at": task.get("lease_expires_at"),
+        "scanned_at": task.get("scanned_at"),
+        "completed_at": task.get("completed_at"),
+        "link_expires_at": task.get("link_expires_at"),
+        "created_at": task.get("created_at"),
+        "updated_at": task.get("updated_at"),
+        "link_type": (account or {}).get("extract_link_type"),
+        "payment_method": (account or {}).get("extract_link_payment_method"),
+    }
+    if reveal_link:
+        out["qr_url"] = _safe_scan_url((
+            (account or {}).get("extract_link_image_url_png")
+            or (account or {}).get("extract_link_image_url_svg")
+        ), {"http", "https"})
+        out["payment_url"] = _safe_scan_url((
+            (account or {}).get("extract_link_long_url")
+            or (account or {}).get("extract_link_copy_paste")
+        ), {"http", "https", "upi"})
+    return out
 
 
 def _decorate_account(row: dict) -> dict:
@@ -1165,6 +1408,335 @@ def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_accounts(), email)
         return _decorate_account(row) if row else None
+
+
+def create_scanner(name: str) -> tuple[dict, str]:
+    """创建扫码员并返回一次性明文密钥。持久化文件中只保存摘要。"""
+    normalized = " ".join(str(name or "").strip().split())
+    if not normalized:
+        raise ValueError("扫码员名称不能为空")
+    if len(normalized) > 64:
+        raise ValueError("扫码员名称最多 64 个字符")
+    with _LOCK:
+        scanners = _load_scanners()
+        if any(str(row.get("name") or "").casefold() == normalized.casefold() for row in scanners):
+            raise ValueError("扫码员名称已存在")
+        key = _new_scanner_key()
+        now = _now()
+        row = {
+            "id": _next_id(scanners),
+            "name": normalized,
+            "key_hash": _scanner_key_hash(key),
+            "enabled": True,
+            "key_version": 1,
+            "created_at": now,
+            "updated_at": now,
+            "last_login_at": None,
+        }
+        scanners.append(row)
+        _save_scanners(scanners)
+        return _public_scanner(row), key
+
+
+def get_scanner(scanner_id: int) -> dict | None:
+    with _LOCK:
+        row = next((
+            row for row in _load_scanners()
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        return _public_scanner(row) if row else None
+
+
+def authenticate_scanner_key(key: str) -> dict | None:
+    candidate = _scanner_key_hash(str(key or ""))
+    with _LOCK:
+        scanners = _load_scanners()
+        matched = next((
+            row for row in scanners
+            if row.get("key_hash")
+            and hmac.compare_digest(str(row.get("key_hash")), candidate)
+        ), None)
+        if matched is None or not bool(matched.get("enabled")):
+            return None
+        matched["last_login_at"] = _now()
+        matched["updated_at"] = _now()
+        _save_scanners(scanners)
+        return _public_scanner(matched)
+
+
+def reset_scanner_key(scanner_id: int) -> tuple[dict, str]:
+    with _LOCK:
+        scanners = _load_scanners()
+        row = next((
+            row for row in scanners
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        if row is None:
+            raise LookupError("扫码员不存在")
+        key = _new_scanner_key()
+        row["key_hash"] = _scanner_key_hash(key)
+        row["key_version"] = int(row.get("key_version") or 1) + 1
+        row["updated_at"] = _now()
+        _save_scanners(scanners)
+        return _public_scanner(row), key
+
+
+def set_scanner_enabled(scanner_id: int, enabled: bool) -> dict:
+    with _LOCK:
+        scanners = _load_scanners()
+        row = next((
+            row for row in scanners
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        if row is None:
+            raise LookupError("扫码员不存在")
+        row["enabled"] = bool(enabled)
+        row["updated_at"] = _now()
+        _save_scanners(scanners)
+        if not enabled:
+            accounts = _load_accounts()
+            tasks = _load_scan_tasks()
+            changed = _sync_scan_tasks_locked(accounts, tasks)
+            for task in tasks:
+                if (
+                    task.get("status") == "claimed"
+                    and int(task.get("scanner_id") or 0) == int(scanner_id)
+                ):
+                    task["status"] = "pending"
+                    task["scanner_id"] = None
+                    task["claimed_at"] = None
+                    task["lease_expires_at"] = None
+                    task["updated_at"] = _now()
+                    _task_event(task, "released", scanner_id=scanner_id, detail="扫码员已停用")
+                    changed = True
+            if changed:
+                _save_scan_tasks(tasks)
+        return _public_scanner(row)
+
+
+def list_scanners() -> list[dict]:
+    with _LOCK:
+        scanners = _load_scanners()
+        tasks = _load_scan_tasks()
+        accounts = _load_accounts()
+        if _sync_scan_tasks_locked(accounts, tasks):
+            _save_scan_tasks(tasks)
+        rows = []
+        for scanner in scanners:
+            scanner_id = int(scanner.get("id") or 0)
+            out = _public_scanner(scanner)
+            own = [task for task in tasks if int(task.get("scanner_id") or 0) == scanner_id]
+            out["claimed_count"] = sum(task.get("status") == "claimed" for task in own)
+            out["scanned_count"] = sum(task.get("status") == "scanned" for task in own)
+            out["completed_count"] = sum(task.get("status") == "completed" for task in own)
+            rows.append(out)
+        return sorted(rows, key=lambda row: int(row.get("id") or 0), reverse=True)
+
+
+def list_scan_tasks_admin(limit: int = 500) -> list[dict]:
+    with _LOCK:
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        scanners = _load_scanners()
+        if _sync_scan_tasks_locked(accounts, tasks):
+            _save_scan_tasks(tasks)
+        account_by_id = {int(row.get("id") or 0): row for row in accounts}
+        scanner_by_id = {int(row.get("id") or 0): row for row in scanners}
+        rows = sorted(tasks, key=lambda row: int(row.get("id") or 0), reverse=True)
+        return [
+            _decorate_scan_task(
+                task,
+                account_by_id.get(int(task.get("account_id") or 0)),
+                scanner_by_id,
+                reveal_link=True,
+            )
+            for task in rows[:max(1, min(int(limit), 5000))]
+        ]
+
+
+def get_scanner_queue(scanner_id: int) -> dict:
+    with _LOCK:
+        scanners = _load_scanners()
+        scanner = next((
+            row for row in scanners
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        if scanner is None or not bool(scanner.get("enabled")):
+            raise PermissionError("扫码员已停用或不存在")
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        if _sync_scan_tasks_locked(accounts, tasks):
+            _save_scan_tasks(tasks)
+        account_by_id = {int(row.get("id") or 0): row for row in accounts}
+        scanner_by_id = {int(row.get("id") or 0): row for row in scanners}
+        pending = [
+            _decorate_scan_task(
+                task,
+                account_by_id.get(int(task.get("account_id") or 0)),
+                scanner_by_id,
+                reveal_link=False,
+            )
+            for task in sorted(tasks, key=lambda row: int(row.get("id") or 0))
+            if task.get("status") == "pending"
+        ]
+        mine = [
+            _decorate_scan_task(
+                task,
+                account_by_id.get(int(task.get("account_id") or 0)),
+                scanner_by_id,
+                reveal_link=task.get("status") == "claimed",
+            )
+            for task in sorted(tasks, key=lambda row: int(row.get("id") or 0), reverse=True)
+            if (
+                int(task.get("scanner_id") or 0) == int(scanner_id)
+                and task.get("status") in {"claimed", "scanned", "completed"}
+            )
+        ]
+        return {
+            "scanner": _public_scanner(scanner),
+            "pending": pending,
+            "mine": mine,
+            "counts": {
+                "pending": len(pending),
+                "claimed": sum(task.get("status") == "claimed" for task in mine),
+                "scanned": sum(task.get("status") == "scanned" for task in mine),
+                "completed": sum(task.get("status") == "completed" for task in mine),
+            },
+        }
+
+
+def claim_scan_task(task_id: int, scanner_id: int, lease_seconds: int = _SCAN_LEASE_SECONDS) -> dict:
+    """原子领取扫码任务；同一任务只会被一个扫码员领取。"""
+    with _LOCK:
+        scanners = _load_scanners()
+        scanner = next((
+            row for row in scanners
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        if scanner is None or not bool(scanner.get("enabled")):
+            raise PermissionError("扫码员已停用或不存在")
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        changed = _sync_scan_tasks_locked(accounts, tasks)
+        task = next((row for row in tasks if int(row.get("id") or 0) == int(task_id)), None)
+        if task is None:
+            if changed:
+                _save_scan_tasks(tasks)
+            raise LookupError("扫码任务不存在")
+        if task.get("status") != "pending":
+            if changed:
+                _save_scan_tasks(tasks)
+            raise RuntimeError("该任务已被领取或已结束")
+        now_ts = time.time()
+        lease_end = now_ts + max(60, min(int(lease_seconds), 3600))
+        expires_ts = float(task.get("link_expires_ts") or 0)
+        if expires_ts:
+            lease_end = min(lease_end, expires_ts)
+        if lease_end <= now_ts:
+            task["status"] = "expired"
+            task["updated_at"] = _now()
+            _task_event(task, "expired")
+            _save_scan_tasks(tasks)
+            raise RuntimeError("支付链接已过期")
+        task["status"] = "claimed"
+        task["scanner_id"] = int(scanner_id)
+        task["claimed_at"] = _now()
+        task["lease_expires_at"] = lease_end
+        task["updated_at"] = _now()
+        _task_event(task, "claimed", scanner_id=scanner_id)
+        _save_scan_tasks(tasks)
+        account_by_id = {int(row.get("id") or 0): row for row in accounts}
+        scanner_by_id = {int(row.get("id") or 0): row for row in scanners}
+        return _decorate_scan_task(
+            task,
+            account_by_id.get(int(task.get("account_id") or 0)),
+            scanner_by_id,
+            reveal_link=True,
+        )
+
+
+def update_scan_task_by_scanner(task_id: int, scanner_id: int, action: str) -> dict:
+    action = str(action or "").strip().lower()
+    if action not in {"scanned", "release"}:
+        raise ValueError("action 仅支持 scanned 或 release")
+    with _LOCK:
+        scanners = _load_scanners()
+        scanner = next((
+            row for row in scanners
+            if int(row.get("id") or 0) == int(scanner_id)
+        ), None)
+        if scanner is None or not bool(scanner.get("enabled")):
+            raise PermissionError("扫码员已停用或不存在")
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        changed = _sync_scan_tasks_locked(accounts, tasks)
+        task = next((row for row in tasks if int(row.get("id") or 0) == int(task_id)), None)
+        if task is None:
+            if changed:
+                _save_scan_tasks(tasks)
+            raise LookupError("扫码任务不存在")
+        if (
+            task.get("status") != "claimed"
+            or int(task.get("scanner_id") or 0) != int(scanner_id)
+        ):
+            if changed:
+                _save_scan_tasks(tasks)
+            raise PermissionError("该任务不属于当前扫码员或领取已失效")
+        now = _now()
+        if action == "scanned":
+            task["status"] = "scanned"
+            task["scanned_at"] = now
+            task["lease_expires_at"] = None
+            _task_event(task, "scanned", scanner_id=scanner_id)
+        else:
+            task["status"] = "pending"
+            task["scanner_id"] = None
+            task["claimed_at"] = None
+            task["lease_expires_at"] = None
+            _task_event(task, "released", scanner_id=scanner_id)
+        task["updated_at"] = now
+        _save_scan_tasks(tasks)
+        account_by_id = {int(row.get("id") or 0): row for row in accounts}
+        scanner_by_id = {int(row.get("id") or 0): row for row in scanners}
+        return _decorate_scan_task(
+            task,
+            account_by_id.get(int(task.get("account_id") or 0)),
+            scanner_by_id,
+            reveal_link=task.get("status") == "claimed",
+        )
+
+
+def release_scan_task_by_admin(task_id: int) -> dict:
+    with _LOCK:
+        scanners = _load_scanners()
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        changed = _sync_scan_tasks_locked(accounts, tasks)
+        task = next((row for row in tasks if int(row.get("id") or 0) == int(task_id)), None)
+        if task is None:
+            if changed:
+                _save_scan_tasks(tasks)
+            raise LookupError("扫码任务不存在")
+        if task.get("status") != "claimed":
+            if changed:
+                _save_scan_tasks(tasks)
+            raise RuntimeError("只有已领取任务可以释放")
+        scanner_id = task.get("scanner_id")
+        task["status"] = "pending"
+        task["scanner_id"] = None
+        task["claimed_at"] = None
+        task["lease_expires_at"] = None
+        task["updated_at"] = _now()
+        _task_event(task, "released", scanner_id=scanner_id, detail="管理员释放")
+        _save_scan_tasks(tasks)
+        account_by_id = {int(row.get("id") or 0): row for row in accounts}
+        scanner_by_id = {int(row.get("id") or 0): row for row in scanners}
+        return _decorate_scan_task(
+            task,
+            account_by_id.get(int(task.get("account_id") or 0)),
+            scanner_by_id,
+            reveal_link=True,
+        )
 
 
 def update_account_note(acc_id: int, note: str) -> bool:

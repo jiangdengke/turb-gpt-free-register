@@ -24,6 +24,8 @@ codex_agent_accounts
 注册任务.json
 注册日志/
 accounts_viewer.html
+扫码员.json
+扫码任务.json
 
 # Cloudflare 域名邮箱池（运行时数据）
 用于注册的域名邮箱.json

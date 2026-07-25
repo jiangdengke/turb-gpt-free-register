@@ -149,6 +149,9 @@
     .status-partial_success { color: #9a6700; background: #fff7d6; }
     .status-running { color: var(--amber); background: #fff7e6; }
     .status-success { color: var(--green); background: #e9f7ef; }
+    .status-claimed { color: var(--amber); background: #fff7e6; }
+    .status-scanned, .status-completed { color: var(--green); background: #e9f7ef; }
+    .status-expired, .status-superseded { color: #475467; background: #f2f4f7; }
     .extract-link-cell {
       display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
       margin-top: 4px; max-width: 100%;
@@ -385,6 +388,7 @@
     <button data-tab="accounts">账号</button>
     <button data-tab="codex">Codex 授权</button>
     <button data-tab="outlook">邮箱池</button>
+    <button data-tab="scanners">扫码员</button>
     <button data-tab="config">配置</button>
   </div>
 </nav>
@@ -638,6 +642,52 @@
     </section>
   </div>
 
+  <!-- ============ 扫码员 ============ -->
+  <div id="tab-scanners" class="hidden">
+    <section class="card">
+      <div class="head"><h2>扫码员</h2></div>
+      <div class="body">
+        <div class="row">
+          <label class="fld">名称
+            <input id="scannerName" maxlength="64" placeholder="例如：扫码员 A">
+          </label>
+          <div class="action-cell">
+            <button class="btn primary" id="btnCreateScanner">创建扫码员</button>
+            <button class="btn" id="btnRefreshScanners">刷新</button>
+          </div>
+        </div>
+        <div id="scannerKeyPanel" class="banner info hidden" style="margin-top:14px;margin-bottom:0;">
+          <div style="font-weight:800;margin-bottom:8px;">新密钥（仅显示一次）</div>
+          <div class="row" style="align-items:center;">
+            <input id="scannerKeyValue" class="mono" readonly style="margin-top:0;">
+            <div class="action-cell"><button class="btn primary" id="btnCopyScannerKey">复制密钥</button></div>
+          </div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <colgroup><col style="width:70px"><col style="width:220px"><col style="width:90px"><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:180px"><col style="width:180px"><col style="width:260px"></colgroup>
+          <thead><tr><th>ID</th><th>名称</th><th>状态</th><th>已领取</th><th>已扫码</th><th>已开通</th><th>最近登录</th><th>创建时间</th><th>操作</th></tr></thead>
+          <tbody id="scannersBody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="toolbar">
+        <div><h2>扫码任务</h2></div>
+        <div class="buttons"><button class="btn" id="btnRefreshScanTasks">刷新</button></div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <colgroup><col style="width:70px"><col style="width:260px"><col style="width:110px"><col style="width:180px"><col style="width:170px"><col style="width:170px"><col style="width:170px"><col style="width:120px"></colgroup>
+          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>扫码员</th><th>领取时间</th><th>扫码时间</th><th>链接到期</th><th>操作</th></tr></thead>
+          <tbody id="scanTasksBody"></tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
   <!-- ============ 配置 ============ -->
   <div id="tab-config" class="hidden">
     <section class="card">
@@ -664,7 +714,7 @@ const $ = (s) => document.querySelector(s);
 const $$ = (s) => Array.from(document.querySelectorAll(s));
 let copySeq = 0;
 const copyStore = new Map();
-let ACCOUNTS = [], OUTLOOK = [], CONFIG = [];
+let ACCOUNTS = [], OUTLOOK = [], CONFIG = [], SCANNERS = [], SCAN_TASKS = [];
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
@@ -750,7 +800,7 @@ async function api(url, opts) {
 
 // ---------- Tab 切换 ----------
 function activateTab(tab, persist=true) {
-  const allowed = ['register','accounts','codex','outlook','config'];
+  const allowed = ['register','accounts','codex','outlook','scanners','config'];
   if (!allowed.includes(tab)) tab = 'register';
   $$('nav button').forEach(x => x.classList.toggle('active', x.dataset.tab === tab));
   allowed.forEach(t => $('#tab-'+t).classList.toggle('hidden', t !== tab));
@@ -758,6 +808,7 @@ function activateTab(tab, persist=true) {
   if (tab === 'accounts') loadAccounts();
   if (tab === 'codex') loadCodex();
   if (tab === 'outlook') loadOutlook();
+  if (tab === 'scanners') loadScanners();
   if (tab === 'config') loadConfig();
   if (tab === 'register') refreshJobs();
 }
@@ -2929,6 +2980,135 @@ $('#codexBody').addEventListener('click', async (e) => {
   }
 });
 
+// ---------- 扫码员 ----------
+function fmtScanDate(v) {
+  if (!v) return '-';
+  const n = Number(v);
+  if (Number.isFinite(n) && n > 0) {
+    const d = new Date(n > 1e12 ? n : n * 1000);
+    return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+  }
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+}
+function scanStatusLabel(status) {
+  return {
+    pending: '待领取',
+    claimed: '已领取',
+    scanned: '已扫码',
+    completed: '已开通',
+    expired: '已过期',
+    superseded: '已替换',
+  }[status] || status || '-';
+}
+function renderScanners() {
+  $('#scannersBody').innerHTML = SCANNERS.length ? SCANNERS.map((scanner) => `
+    <tr>
+      <td class="muted">#${esc(scanner.id)}</td>
+      <td><div class="main-cell">${esc(scanner.name)}</div></td>
+      <td>${scanner.enabled ? '<span class="pill status-success">启用</span>' : '<span class="pill status-disabled">停用</span>'}</td>
+      <td>${esc(scanner.claimed_count || 0)}</td>
+      <td>${esc(scanner.scanned_count || 0)}</td>
+      <td>${esc(scanner.completed_count || 0)}</td>
+      <td class="muted">${esc(fmtScanDate(scanner.last_login_at))}</td>
+      <td class="muted">${esc(fmtScanDate(scanner.created_at))}</td>
+      <td class="actions">
+        <button onclick="resetScannerKey(${Number(scanner.id)})">重置密钥</button>
+        <button class="${scanner.enabled ? 'danger' : 'good'}" onclick="toggleScanner(${Number(scanner.id)}, ${scanner.enabled ? 'false' : 'true'})">${scanner.enabled ? '停用' : '启用'}</button>
+      </td>
+    </tr>`).join('') : '<tr><td colspan="9" class="muted center">暂无扫码员</td></tr>';
+}
+function renderScanTasks() {
+  $('#scanTasksBody').innerHTML = SCAN_TASKS.length ? SCAN_TASKS.map((task) => `
+    <tr>
+      <td class="muted">#${esc(task.id)}</td>
+      <td><div class="main-cell">${esc(task.email)}</div><div class="sub-cell">账号 #${esc(task.account_id)}</div></td>
+      <td><span class="pill status-${esc(task.status)}">${esc(scanStatusLabel(task.status))}</span></td>
+      <td>${task.scanner_name ? esc(task.scanner_name) : '<span class="muted">-</span>'}</td>
+      <td class="muted">${esc(fmtScanDate(task.claimed_at))}</td>
+      <td class="muted">${esc(fmtScanDate(task.scanned_at))}</td>
+      <td class="muted">${esc(fmtScanDate(task.link_expires_at))}</td>
+      <td class="actions">${task.status === 'claimed' ? `<button class="danger" onclick="adminReleaseScanTask(${Number(task.id)})">释放</button>` : '<span class="muted">-</span>'}</td>
+    </tr>`).join('') : '<tr><td colspan="8" class="muted center">暂无扫码任务</td></tr>';
+}
+async function loadScanners() {
+  try {
+    const [scannerData, taskData] = await Promise.all([
+      api('/api/scanners'),
+      api('/api/scan-tasks?limit=1000'),
+    ]);
+    SCANNERS = scannerData.items || [];
+    SCAN_TASKS = taskData.items || [];
+    renderScanners();
+    renderScanTasks();
+  } catch (error) {
+    showToast('扫码员数据加载失败: ' + error.message);
+  }
+}
+$('#btnCreateScanner').addEventListener('click', async () => {
+  const name = $('#scannerName').value.trim();
+  if (!name) { showToast('请输入扫码员名称'); return; }
+  $('#btnCreateScanner').disabled = true;
+  try {
+    const result = await api('/api/scanners', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({name}),
+    });
+    $('#scannerName').value = '';
+    $('#scannerKeyValue').value = result.key || '';
+    $('#scannerKeyPanel').classList.remove('hidden');
+    showToast('扫码员已创建');
+    await loadScanners();
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    $('#btnCreateScanner').disabled = false;
+  }
+});
+$('#btnCopyScannerKey').addEventListener('click', () => copyText($('#scannerKeyValue').value));
+$('#btnRefreshScanners').addEventListener('click', loadScanners);
+$('#btnRefreshScanTasks').addEventListener('click', loadScanners);
+async function resetScannerKey(scannerId) {
+  const scanner = SCANNERS.find((item) => Number(item.id) === Number(scannerId));
+  if (!confirm(`确定重置“${scanner?.name || scannerId}”的密钥吗？旧密钥和已有登录会立即失效。`)) return;
+  try {
+    const result = await api(`/api/scanners/${scannerId}/reset-key`, {method:'POST'});
+    $('#scannerKeyValue').value = result.key || '';
+    $('#scannerKeyPanel').classList.remove('hidden');
+    showToast('密钥已重置');
+    await loadScanners();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+async function toggleScanner(scannerId, enabled) {
+  const scanner = SCANNERS.find((item) => Number(item.id) === Number(scannerId));
+  const action = enabled ? '启用' : '停用';
+  if (!confirm(`确定${action}“${scanner?.name || scannerId}”吗？${enabled ? '' : '其已领取任务会立即释放。'}`)) return;
+  try {
+    await api(`/api/scanners/${scannerId}/enabled`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({enabled}),
+    });
+    showToast(`扫码员已${action}`);
+    await loadScanners();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+async function adminReleaseScanTask(taskId) {
+  if (!confirm(`确定释放扫码任务 #${taskId} 吗？`)) return;
+  try {
+    await api(`/api/scan-tasks/${taskId}/release`, {method:'POST'});
+    showToast('任务已释放');
+    await loadScanners();
+  } catch (error) {
+    showToast(error.message);
+  }
+}
+
 // ---------- 配置 ----------
 let CONFIG_ACTIVE_GROUP = '';
 let CONFIG_EMAIL_ACTIVE_SECTION = '通用邮箱 / OTP';
@@ -3379,6 +3559,7 @@ activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false)
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
 setInterval(loadSummary, 5000);
 setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
+setInterval(() => { if (!$('#tab-scanners').classList.contains('hidden')) loadScanners(); }, 5000);
 </script>
 </body>
 </html>

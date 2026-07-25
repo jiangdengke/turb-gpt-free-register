@@ -73,7 +73,7 @@
 <body>
   <form class="card" method="post" action="{{ login_url }}">
     <h1>授权码登录</h1>
-    <p class="desc">请输入启动命令或配置文件中设置的授权码。</p>
+    <p class="desc">请输入管理员授权码或扫码员密钥。</p>
     {% if error %}<div class="err">{{ error }}</div>{% endif %}
     <input id="authCodeInput" name="auth_code" type="password" autocomplete="current-password" autofocus placeholder="授权码">
     <label class="remember"><input id="rememberAuthCode" name="remember" type="checkbox" value="1">记住授权码</label>

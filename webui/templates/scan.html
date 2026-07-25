@@ -1,0 +1,392 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>扫码工作台</title>
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      --bg: #edf2f7;
+      --surface: #fff;
+      --text: #172033;
+      --muted: #667085;
+      --line: #d9e2ec;
+      --blue: #2563eb;
+      --green: #16803c;
+      --red: #c2413a;
+      --amber: #a15c08;
+      --soft-blue: #eef4ff;
+      --soft-green: #eaf7ef;
+      --soft-red: #fff0ef;
+    }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+    }
+    header {
+      background: #101827;
+      color: #fff;
+      border-bottom: 1px solid #27364b;
+    }
+    .header-inner {
+      width: min(1280px, calc(100vw - 32px));
+      min-height: 76px;
+      margin: 0 auto;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+    }
+    h1, h2, p { margin: 0; }
+    h1 { font-size: 23px; letter-spacing: 0; }
+    .identity { margin-top: 5px; color: #b8c7d9; font-size: 13px; }
+    button, .link-button {
+      min-height: 34px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      color: var(--text);
+      padding: 0 12px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+      cursor: pointer;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    button:hover, .link-button:hover { background: #f7f9fc; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+    .primary:hover { background: #1d4ed8; }
+    .good { color: #166534; border-color: #78ba93; background: var(--soft-green); }
+    .danger { color: #b3261e; border-color: #efa8a2; background: var(--soft-red); }
+    header button { border-color: #53657c; background: #17243a; color: #fff; }
+    main {
+      width: min(1280px, calc(100vw - 32px));
+      margin: 18px auto 32px;
+      display: grid;
+      gap: 16px;
+    }
+    .stats {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(120px, 1fr));
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .stat { padding: 14px 16px; border-right: 1px solid var(--line); }
+    .stat:last-child { border-right: 0; }
+    .stat span { display: block; color: var(--muted); font-size: 12px; }
+    .stat strong { display: block; margin-top: 4px; font-size: 22px; }
+    section {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--surface);
+      overflow: hidden;
+    }
+    .section-head {
+      min-height: 52px;
+      padding: 12px 16px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      background: #f8fafc;
+    }
+    .section-head h2 { font-size: 16px; }
+    .muted { color: var(--muted); font-size: 12px; }
+    .current-grid {
+      padding: 16px;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(min(330px, 100%), 1fr));
+      gap: 14px;
+    }
+    .task-card {
+      min-width: 0;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 14px;
+      display: grid;
+      grid-template-columns: 188px minmax(0, 1fr);
+      gap: 14px;
+      align-items: start;
+    }
+    .qr {
+      width: 188px;
+      height: 188px;
+      padding: 7px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: #fff;
+      object-fit: contain;
+    }
+    .qr-empty {
+      width: 188px;
+      height: 188px;
+      display: grid;
+      place-items: center;
+      border: 1px dashed #aab6c5;
+      border-radius: 6px;
+      color: var(--muted);
+      font-size: 12px;
+      text-align: center;
+      padding: 12px;
+    }
+    .task-meta { min-width: 0; display: grid; gap: 9px; }
+    .email { font-weight: 800; overflow-wrap: anywhere; }
+    .meta-row { color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .countdown { color: var(--amber); font-weight: 800; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 4px; }
+    .table-wrap { overflow: auto; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th, td {
+      padding: 11px 14px;
+      border-bottom: 1px solid #edf1f5;
+      text-align: left;
+      white-space: nowrap;
+      vertical-align: middle;
+    }
+    th { color: #475467; background: #fbfcfe; font-size: 12px; }
+    tbody tr:last-child td { border-bottom: 0; }
+    .pill {
+      display: inline-flex;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 12px;
+      font-weight: 800;
+    }
+    .status-pending { color: #1d4ed8; background: var(--soft-blue); }
+    .status-claimed { color: var(--amber); background: #fff5dd; }
+    .status-scanned, .status-completed { color: var(--green); background: var(--soft-green); }
+    .empty { padding: 30px 16px; color: var(--muted); text-align: center; font-size: 13px; }
+    #toast {
+      position: fixed;
+      right: 18px;
+      bottom: 18px;
+      max-width: min(420px, calc(100vw - 36px));
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: #101827;
+      color: #fff;
+      box-shadow: 0 14px 30px rgba(15,23,42,.24);
+      opacity: 0;
+      transform: translateY(8px);
+      pointer-events: none;
+      transition: .18s ease;
+    }
+    #toast.show { opacity: 1; transform: translateY(0); }
+    @media (max-width: 760px) {
+      .header-inner { width: min(100% - 24px, 1280px); }
+      main { width: min(100% - 20px, 1280px); margin-top: 10px; }
+      .stats { grid-template-columns: repeat(2, 1fr); }
+      .stat:nth-child(2) { border-right: 0; }
+      .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
+      .task-card { grid-template-columns: 1fr; }
+      .qr, .qr-empty { width: min(260px, 100%); height: auto; aspect-ratio: 1; justify-self: center; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div>
+        <h1>扫码工作台</h1>
+        <p class="identity">{{ scanner_name }}</p>
+      </div>
+      <form method="post" action="/logout"><button type="submit">退出</button></form>
+    </div>
+  </header>
+
+  <main>
+    <div class="stats">
+      <div class="stat"><span>待领取</span><strong id="countPending">0</strong></div>
+      <div class="stat"><span>我已领取</span><strong id="countClaimed">0</strong></div>
+      <div class="stat"><span>我已扫码</span><strong id="countScanned">0</strong></div>
+      <div class="stat"><span>已开通</span><strong id="countCompleted">0</strong></div>
+    </div>
+
+    <section>
+      <div class="section-head">
+        <h2>我已领取</h2>
+        <span class="muted" id="refreshState">加载中</span>
+      </div>
+      <div id="currentTasks"></div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>待领取</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务</th><th>账号</th><th>方式</th><th>链接到期</th><th>操作</th></tr></thead>
+          <tbody id="pendingBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="pendingEmpty">暂无待领取任务</div>
+    </section>
+
+    <section>
+      <div class="section-head"><h2>我的记录</h2></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>扫码时间</th><th>完成时间</th></tr></thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="historyEmpty">暂无扫码记录</div>
+    </section>
+  </main>
+  <div id="toast"></div>
+
+  <script>
+    const $ = (s) => document.querySelector(s);
+    let loading = false;
+
+    function esc(v) {
+      return String(v == null || v === '' ? '-' : v)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+    }
+    function fmtDate(v) {
+      if (!v) return '-';
+      const numeric = Number(v);
+      const d = Number.isFinite(numeric) && numeric > 0
+        ? new Date(numeric > 1e12 ? numeric : numeric * 1000)
+        : new Date(v);
+      return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+    }
+    function statusLabel(status) {
+      return {pending:'待领取', claimed:'已领取', scanned:'已扫码', completed:'已开通'}[status] || status || '-';
+    }
+    function showToast(text) {
+      const toast = $('#toast');
+      toast.textContent = text;
+      toast.classList.add('show');
+      clearTimeout(showToast.timer);
+      showToast.timer = setTimeout(() => toast.classList.remove('show'), 1800);
+    }
+    async function api(url, options) {
+      const response = await fetch(url, options);
+      if (response.status === 401) {
+        location.href = '/login?next=/scan';
+        throw new Error('登录已失效');
+      }
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || `HTTP ${response.status}`);
+      return data;
+    }
+    function remaining(ts) {
+      const seconds = Math.max(0, Math.floor(Number(ts || 0) - Date.now() / 1000));
+      const minute = Math.floor(seconds / 60);
+      const second = seconds % 60;
+      return `${minute}:${String(second).padStart(2, '0')}`;
+    }
+    function render(data) {
+      const counts = data.counts || {};
+      $('#countPending').textContent = counts.pending || 0;
+      $('#countClaimed').textContent = counts.claimed || 0;
+      $('#countScanned').textContent = counts.scanned || 0;
+      $('#countCompleted').textContent = counts.completed || 0;
+
+      const claimed = (data.mine || []).filter((task) => task.status === 'claimed');
+      $('#currentTasks').innerHTML = claimed.length ? `<div class="current-grid">${claimed.map((task) => `
+        <article class="task-card">
+          ${task.qr_url
+            ? `<img class="qr" src="${esc(task.qr_url)}" alt="任务 ${esc(task.id)} 支付二维码" referrerpolicy="no-referrer">`
+            : `<div class="qr-empty">当前任务没有二维码图片<br>请打开支付链接</div>`}
+          <div class="task-meta">
+            <div><span class="pill status-claimed">任务 #${esc(task.id)}</span></div>
+            <div class="email">${esc(task.email)}</div>
+            <div class="meta-row">方式：${esc(task.payment_method || task.link_type || '-')}</div>
+            <div class="meta-row">领取租约：<span class="countdown" data-countdown="${esc(task.lease_expires_at)}">${remaining(task.lease_expires_at)}</span></div>
+            <div class="meta-row">链接到期：${esc(fmtDate(task.link_expires_at))}</div>
+            <div class="actions">
+              ${task.payment_url ? `<a class="link-button" href="${esc(task.payment_url)}" target="_blank" rel="noopener noreferrer">打开支付链接</a>` : ''}
+              <button class="good" onclick="taskAction(${Number(task.id)}, 'scanned', this)">已扫码</button>
+              <button class="danger" onclick="taskAction(${Number(task.id)}, 'release', this)">释放</button>
+            </div>
+          </div>
+        </article>`).join('')}</div>` : '<div class="empty">当前没有已领取任务</div>';
+
+      const pending = data.pending || [];
+      $('#pendingBody').innerHTML = pending.map((task) => `
+        <tr>
+          <td>#${esc(task.id)}</td>
+          <td>${esc(task.email)}</td>
+          <td>${esc(task.payment_method || task.link_type || '-')}</td>
+          <td>${esc(fmtDate(task.link_expires_at))}</td>
+          <td><button class="primary" onclick="claimTask(${Number(task.id)}, this)">领取</button></td>
+        </tr>`).join('');
+      $('#pendingEmpty').style.display = pending.length ? 'none' : 'block';
+
+      const history = (data.mine || []).filter((task) => ['scanned', 'completed'].includes(task.status));
+      $('#historyBody').innerHTML = history.map((task) => `
+        <tr>
+          <td>#${esc(task.id)}</td>
+          <td>${esc(task.email)}</td>
+          <td><span class="pill status-${esc(task.status)}">${esc(statusLabel(task.status))}</span></td>
+          <td>${esc(fmtDate(task.scanned_at))}</td>
+          <td>${esc(fmtDate(task.completed_at))}</td>
+        </tr>`).join('');
+      $('#historyEmpty').style.display = history.length ? 'none' : 'block';
+    }
+    async function loadQueue(silent = false) {
+      if (loading) return;
+      loading = true;
+      try {
+        const data = await api('/api/scan/queue');
+        render(data);
+        $('#refreshState').textContent = `更新于 ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        $('#refreshState').textContent = '更新失败';
+        if (!silent) showToast(error.message);
+      } finally {
+        loading = false;
+      }
+    }
+    async function claimTask(id, button) {
+      button.disabled = true;
+      try {
+        await api(`/api/scan/tasks/${id}/claim`, {method:'POST'});
+        showToast(`已领取任务 #${id}`);
+        await loadQueue();
+      } catch (error) {
+        showToast(error.message);
+        await loadQueue(true);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    async function taskAction(id, action, button) {
+      button.disabled = true;
+      try {
+        await api(`/api/scan/tasks/${id}/action`, {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({action}),
+        });
+        showToast(action === 'scanned' ? '已记录扫码' : '任务已释放');
+        await loadQueue();
+      } catch (error) {
+        showToast(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    setInterval(() => {
+      document.querySelectorAll('[data-countdown]').forEach((el) => {
+        el.textContent = remaining(el.dataset.countdown);
+      });
+    }, 1000);
+    loadQueue();
+    setInterval(() => loadQueue(true), 5000);
+  </script>
+</body>
+</html>

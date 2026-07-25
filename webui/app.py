@@ -16,10 +16,15 @@ import time
 import uuid
 from urllib.parse import urlparse
 
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, redirect, render_template, request
 
 from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service
-from webui.auth import init_auth, register_auth_routes
+from webui.auth import (
+    current_auth_role,
+    current_scanner_identity,
+    init_auth,
+    register_auth_routes,
+)
 from core import registration_service as svc
 from webui import config_editor
 
@@ -109,6 +114,113 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/")
     def index():
         return render_template("index.html")
+
+    @app.get("/scan")
+    def scanner_workbench():
+        if current_auth_role() != "scanner":
+            return redirect("/")
+        scanner = current_scanner_identity() or {}
+        return render_template("scan.html", scanner_name=scanner.get("name") or "扫码员")
+
+    # ----------------------------------------------------------
+    # 扫码员 / 扫码任务
+    # ----------------------------------------------------------
+    @app.get("/api/scanners")
+    def api_scanners():
+        return jsonify({"ok": True, "items": db.list_scanners()})
+
+    @app.post("/api/scanners")
+    def api_create_scanner():
+        data = request.get_json(silent=True) or {}
+        try:
+            scanner, key = db.create_scanner(data.get("name"))
+            return jsonify({"ok": True, "scanner": scanner, "key": key}), 201
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+
+    @app.post("/api/scanners/<int:scanner_id>/reset-key")
+    def api_reset_scanner_key(scanner_id: int):
+        try:
+            scanner, key = db.reset_scanner_key(scanner_id)
+            return jsonify({"ok": True, "scanner": scanner, "key": key})
+        except LookupError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+
+    @app.post("/api/scanners/<int:scanner_id>/enabled")
+    def api_set_scanner_enabled(scanner_id: int):
+        data = request.get_json(silent=True) or {}
+        if "enabled" not in data or not isinstance(data.get("enabled"), bool):
+            return jsonify({"ok": False, "error": "enabled 必须是布尔值"}), 400
+        try:
+            scanner = db.set_scanner_enabled(scanner_id, data["enabled"])
+            return jsonify({"ok": True, "scanner": scanner})
+        except LookupError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+
+    @app.get("/api/scan-tasks")
+    def api_scan_tasks():
+        limit = request.args.get("limit", default=500, type=int)
+        return jsonify({"ok": True, "items": db.list_scan_tasks_admin(limit=limit)})
+
+    @app.post("/api/scan-tasks/<int:task_id>/release")
+    def api_admin_release_scan_task(task_id: int):
+        try:
+            return jsonify({"ok": True, "task": db.release_scan_task_by_admin(task_id)})
+        except LookupError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+
+    def _scanner_or_403():
+        scanner = current_scanner_identity()
+        if scanner:
+            return scanner, None
+        return None, (jsonify({"ok": False, "error": "该接口仅供扫码员使用"}), 403)
+
+    @app.get("/api/scan/queue")
+    def api_scanner_queue():
+        scanner, error = _scanner_or_403()
+        if error:
+            return error
+        try:
+            return jsonify({"ok": True, **db.get_scanner_queue(int(scanner["id"]))})
+        except PermissionError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 403
+
+    @app.post("/api/scan/tasks/<int:task_id>/claim")
+    def api_claim_scan_task(task_id: int):
+        scanner, error = _scanner_or_403()
+        if error:
+            return error
+        try:
+            task = db.claim_scan_task(task_id, int(scanner["id"]))
+            return jsonify({"ok": True, "task": task})
+        except LookupError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except PermissionError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 403
+        except RuntimeError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 409
+
+    @app.post("/api/scan/tasks/<int:task_id>/action")
+    def api_update_scan_task(task_id: int):
+        scanner, error = _scanner_or_403()
+        if error:
+            return error
+        data = request.get_json(silent=True) or {}
+        try:
+            task = db.update_scan_task_by_scanner(
+                task_id,
+                int(scanner["id"]),
+                data.get("action"),
+            )
+            return jsonify({"ok": True, "task": task})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except LookupError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 404
+        except PermissionError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 403
 
     # ----------------------------------------------------------
     # 统计概览

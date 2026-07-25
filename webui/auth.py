@@ -12,10 +12,16 @@ from typing import Any
 
 from flask import Response, jsonify, redirect, render_template, request, session, url_for
 
+from core import db
+
 logger = logging.getLogger(__name__)
 
 AUTH_ENV_KEYS = ("WEBUI_AUTH_CODE", "AUTH_CODE", "WEB_AUTH_CODE")
 _SESSION_KEY = "webui_auth_ok"
+_SESSION_ROLE_KEY = "webui_auth_role"
+_SESSION_SCANNER_ID_KEY = "webui_scanner_id"
+_SESSION_SCANNER_NAME_KEY = "webui_scanner_name"
+_SESSION_SCANNER_VERSION_KEY = "webui_scanner_key_version"
 _AUTH_CODE: str | None = None
 _GENERATED = False
 
@@ -82,10 +88,54 @@ def code_is_valid(code: str) -> bool:
     return bool(expected) and bool(code) and hmac.compare_digest(str(code), expected)
 
 
+def _clear_auth_session() -> None:
+    for key in (
+        _SESSION_KEY,
+        _SESSION_ROLE_KEY,
+        _SESSION_SCANNER_ID_KEY,
+        _SESSION_SCANNER_NAME_KEY,
+        _SESSION_SCANNER_VERSION_KEY,
+    ):
+        session.pop(key, None)
+
+
+def current_auth_role() -> str | None:
+    """返回 admin/scanner；旧版布尔会话按管理员兼容。"""
+    if code_is_valid(_extract_auth_code()):
+        return "admin"
+    if session.get(_SESSION_KEY) is not True:
+        return None
+    role = str(session.get(_SESSION_ROLE_KEY) or "admin")
+    if role != "scanner":
+        return "admin"
+    scanner_id = session.get(_SESSION_SCANNER_ID_KEY)
+    try:
+        scanner = db.get_scanner(int(scanner_id))
+    except (TypeError, ValueError):
+        scanner = None
+    if (
+        scanner is None
+        or not scanner.get("enabled")
+        or int(scanner.get("key_version") or 1)
+        != int(session.get(_SESSION_SCANNER_VERSION_KEY) or 0)
+    ):
+        _clear_auth_session()
+        return None
+    session[_SESSION_SCANNER_NAME_KEY] = scanner.get("name") or ""
+    return "scanner"
+
+
+def current_scanner_identity() -> dict | None:
+    if current_auth_role() != "scanner":
+        return None
+    return {
+        "id": int(session.get(_SESSION_SCANNER_ID_KEY) or 0),
+        "name": session.get(_SESSION_SCANNER_NAME_KEY) or "",
+    }
+
+
 def request_is_authorized() -> bool:
-    if session.get(_SESSION_KEY) is True:
-        return True
-    return code_is_valid(_extract_auth_code())
+    return current_auth_role() is not None
 
 
 def _wants_json() -> bool:
@@ -101,6 +151,12 @@ def _unauthorized_response():
     return redirect(url_for("auth_login", next=request.path))
 
 
+def _forbidden_response():
+    if _wants_json():
+        return jsonify({"ok": False, "error": "当前扫码员没有管理权限"}), 403
+    return redirect("/scan")
+
+
 def register_auth_routes(app: Any) -> None:
     @app.before_request
     def _require_auth_code():
@@ -109,9 +165,14 @@ def register_auth_routes(app: Any) -> None:
             return None
         if request.path in ("/favicon.ico",):
             return Response(status=204)
-        if request_is_authorized():
-            return None
-        return _unauthorized_response()
+        role = current_auth_role()
+        if role is None:
+            return _unauthorized_response()
+        if role == "scanner":
+            scanner_path = request.path == "/scan" or request.path.startswith("/api/scan/")
+            if not scanner_path:
+                return _forbidden_response()
+        return None
 
     @app.route("/login", methods=["GET", "POST"], endpoint="auth_login")
     def _auth_login():
@@ -123,15 +184,27 @@ def register_auth_routes(app: Any) -> None:
             code = (request.form.get("auth_code") or "").strip()
             remember = (request.form.get("remember") or "").strip().lower() in ("1", "true", "on", "yes")
             if code_is_valid(code):
+                _clear_auth_session()
                 session.permanent = remember
                 session[_SESSION_KEY] = True
+                session[_SESSION_ROLE_KEY] = "admin"
                 return redirect(next_url)
+            scanner = db.authenticate_scanner_key(code)
+            if scanner:
+                _clear_auth_session()
+                session.permanent = remember
+                session[_SESSION_KEY] = True
+                session[_SESSION_ROLE_KEY] = "scanner"
+                session[_SESSION_SCANNER_ID_KEY] = int(scanner.get("id") or 0)
+                session[_SESSION_SCANNER_NAME_KEY] = scanner.get("name") or ""
+                session[_SESSION_SCANNER_VERSION_KEY] = int(scanner.get("key_version") or 1)
+                return redirect("/scan")
             error = "授权码错误"
         return render_template("login.html", error=error, next_url=next_url, login_url=url_for("auth_login"))
 
     @app.post("/logout", endpoint="auth_logout")
     def _auth_logout():
-        session.pop(_SESSION_KEY, None)
+        _clear_auth_session()
         if _wants_json():
             return jsonify({"ok": True})
         return redirect(url_for("auth_login"))
