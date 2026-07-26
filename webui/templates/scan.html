@@ -114,6 +114,26 @@
     }
     .section-head h2 { font-size: 16px; }
     .muted { color: var(--muted); font-size: 12px; }
+    .queue-head { flex-wrap: wrap; }
+    .queue-tabs { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .queue-tab { color: var(--muted); background: #fff; }
+    .queue-tab.active {
+      color: #1d4ed8;
+      border-color: #9ab8ff;
+      background: var(--soft-blue);
+    }
+    .tab-count {
+      min-width: 22px;
+      margin-left: 6px;
+      padding: 1px 6px;
+      border-radius: 999px;
+      background: #e8edf5;
+      color: #475467;
+      text-align: center;
+      font-size: 11px;
+    }
+    .queue-tab.active .tab-count { color: #1d4ed8; background: #dbe7ff; }
+    .queue-panel[hidden] { display: none; }
     .current-grid {
       padding: 16px;
       display: grid;
@@ -180,6 +200,23 @@
     .status-failed { color: var(--red); background: var(--soft-red); }
     .candidate-message { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
     .empty { padding: 30px 16px; color: var(--muted); text-align: center; font-size: 13px; }
+    .pagination {
+      min-height: 48px;
+      padding: 8px 14px;
+      border-top: 1px solid var(--line);
+      background: #fbfcfe;
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+      gap: 8px;
+    }
+    .pagination .page-info {
+      min-width: 112px;
+      color: var(--muted);
+      text-align: center;
+      font-size: 12px;
+    }
+    .pagination:empty { display: none; }
     #toast {
       position: fixed;
       right: 18px;
@@ -204,6 +241,10 @@
       .stat:nth-child(-n+2) { border-bottom: 1px solid var(--line); }
       .task-card { grid-template-columns: 1fr; }
       .qr, .qr-empty { width: min(260px, 100%); height: auto; aspect-ratio: 1; justify-self: center; }
+      .section-head { align-items: flex-start; }
+      .queue-tabs { width: 100%; }
+      .queue-tab { flex: 1 1 auto; }
+      .pagination { justify-content: center; }
     }
   </style>
 </head>
@@ -241,40 +282,57 @@
       <div id="currentTasks"></div>
     </section>
 
-    <section>
-      <div class="section-head">
-        <h2 data-i18n="extractAccounts">可提链账号</h2>
-        <span class="muted" id="extractCandidateState">0</span>
+    <section aria-label="任务队列">
+      <div class="section-head queue-head">
+        <div class="queue-tabs" role="tablist">
+          <button class="queue-tab" type="button" role="tab" data-queue-tab="extract">
+            <span data-i18n="extractAccounts">可提链账号</span>
+            <span class="tab-count" id="extractTabCount">0</span>
+          </button>
+          <button class="queue-tab" type="button" role="tab" data-queue-tab="pending">
+            <span data-i18n="pendingTasks">待领取</span>
+            <span class="tab-count" id="pendingTabCount">0</span>
+          </button>
+          <button class="queue-tab" type="button" role="tab" data-queue-tab="history">
+            <span data-i18n="history">我的记录</span>
+            <span class="tab-count" id="historyTabCount">0</span>
+          </button>
+        </div>
+        <span class="muted" id="queueState">0</span>
       </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th data-i18n="account">账号</th><th data-i18n="extractStatus">提链状态</th><th data-i18n="method">方式</th><th data-i18n="actions">操作</th></tr></thead>
-          <tbody id="extractCandidateBody"></tbody>
-        </table>
-      </div>
-      <div class="empty" id="extractCandidateEmpty" data-i18n="noExtractCandidates">暂无可提链账号</div>
-    </section>
 
-    <section>
-      <div class="section-head"><h2 data-i18n="pendingTasks">待领取</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="method">方式</th><th data-i18n="linkExpires">链接到期</th><th data-i18n="actions">操作</th></tr></thead>
-          <tbody id="pendingBody"></tbody>
-        </table>
+      <div class="queue-panel" data-queue-panel="extract">
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="account">账号</th><th data-i18n="extractStatus">提链状态</th><th data-i18n="method">方式</th><th data-i18n="actions">操作</th></tr></thead>
+            <tbody id="extractCandidateBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="extractCandidateEmpty" data-i18n="noExtractCandidates">暂无可提链账号</div>
+        <div class="pagination" id="extractPagination"></div>
       </div>
-      <div class="empty" id="pendingEmpty" data-i18n="noPending">暂无待领取任务</div>
-    </section>
 
-    <section>
-      <div class="section-head"><h2 data-i18n="history">我的记录</h2></div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="status">状态</th><th data-i18n="detectedAt">检测时间</th><th data-i18n="completedAt">完成时间</th></tr></thead>
-          <tbody id="historyBody"></tbody>
-        </table>
+      <div class="queue-panel" data-queue-panel="pending" hidden>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="method">方式</th><th data-i18n="linkExpires">链接到期</th><th data-i18n="actions">操作</th></tr></thead>
+            <tbody id="pendingBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="pendingEmpty" data-i18n="noPending">暂无待领取任务</div>
+        <div class="pagination" id="pendingPagination"></div>
       </div>
-      <div class="empty" id="historyEmpty" data-i18n="noHistory">暂无扫码记录</div>
+
+      <div class="queue-panel" data-queue-panel="history" hidden>
+        <div class="table-wrap">
+          <table>
+            <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="status">状态</th><th data-i18n="detectedAt">检测时间</th><th data-i18n="completedAt">完成时间</th></tr></thead>
+            <tbody id="historyBody"></tbody>
+          </table>
+        </div>
+        <div class="empty" id="historyEmpty" data-i18n="noHistory">暂无扫码记录</div>
+        <div class="pagination" id="historyPagination"></div>
+      </div>
     </section>
   </main>
   <div id="toast"></div>
@@ -282,6 +340,10 @@
   <script>
     const $ = (s) => document.querySelector(s);
     let loading = false;
+    const PAGE_SIZE = 20;
+    const queuePages = {extract: 1, pending: 1, history: 1};
+    let activeQueueTab = null;
+    let latestQueueData = null;
     const LOCALE_KEY = 'scanner-locale';
     const I18N = {
       zh: {
@@ -301,6 +363,7 @@
         linkExpired: '链接已过期', extractAndClaim: '提链并领取', retryExtract: '重试提链',
         confirmExtract: '确定提链并领取该账号吗？成功提链会消耗 1 次 CDK。', extractQueued: '提链任务已提交',
         activeSummary: '当前 {active}/{limit}', limitReached: '已达上限',
+        previousPage: '上一页', nextPage: '下一页', pageSummary: '第 {page}/{pages} 页 · 共 {count} 条',
       },
       hi: {
         title: 'स्कैन कार्यक्षेत्र', logout: 'लॉग आउट', pending: 'लंबित',
@@ -321,6 +384,7 @@
         linkExpired: 'लिंक समाप्त', extractAndClaim: 'लिंक बनाएँ और लें', retryExtract: 'फिर से प्रयास करें',
         confirmExtract: 'इस खाते का लिंक बनाकर कार्य लेना है? सफल लिंक पर 1 CDK उपयोग होगा।', extractQueued: 'लिंक कार्य जमा हुआ',
         activeSummary: 'वर्तमान {active}/{limit}', limitReached: 'सीमा पूरी',
+        previousPage: 'पिछला', nextPage: 'अगला', pageSummary: 'पृष्ठ {page}/{pages} · कुल {count}',
       },
       en: {
         title: 'Scan Workbench', logout: 'Log out', pending: 'Pending',
@@ -341,6 +405,7 @@
         linkExpired: 'Link expired', extractAndClaim: 'Create and claim', retryExtract: 'Retry link',
         confirmExtract: 'Create the payment link and claim this account? A successful link uses 1 CDK.', extractQueued: 'Link task submitted',
         activeSummary: 'Active {active}/{limit}', limitReached: 'Limit reached',
+        previousPage: 'Previous', nextPage: 'Next', pageSummary: 'Page {page}/{pages} · {count} total',
       },
     };
     const savedLocale = localStorage.getItem(LOCALE_KEY);
@@ -413,7 +478,51 @@
       const second = seconds % 60;
       return `${minute}:${String(second).padStart(2, '0')}`;
     }
+    function pageItems(items, key) {
+      const total = items.length;
+      const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+      queuePages[key] = Math.max(1, Math.min(queuePages[key] || 1, pages));
+      const page = queuePages[key];
+      return {
+        items: items.slice((page - 1) * PAGE_SIZE, page * PAGE_SIZE),
+        page,
+        pages,
+        total,
+      };
+    }
+    function renderPagination(id, key, result) {
+      const container = $(`#${id}`);
+      if (!result.total) {
+        container.innerHTML = '';
+        return;
+      }
+      container.innerHTML = `
+        <button type="button" ${result.page <= 1 ? 'disabled' : ''} onclick="changePage('${key}', -1)">${esc(t('previousPage'))}</button>
+        <span class="page-info">${esc(t('pageSummary', {page: result.page, pages: result.pages, count: result.total}))}</span>
+        <button type="button" ${result.page >= result.pages ? 'disabled' : ''} onclick="changePage('${key}', 1)">${esc(t('nextPage'))}</button>
+      `;
+    }
+    function selectQueueTab(key) {
+      if (!['extract', 'pending', 'history'].includes(key)) return;
+      activeQueueTab = key;
+      document.querySelectorAll('[data-queue-tab]').forEach((button) => {
+        const selected = button.dataset.queueTab === key;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', selected ? 'true' : 'false');
+      });
+      document.querySelectorAll('[data-queue-panel]').forEach((panel) => {
+        panel.hidden = panel.dataset.queuePanel !== key;
+      });
+    }
+    function changePage(key, delta) {
+      queuePages[key] = Math.max(1, (queuePages[key] || 1) + delta);
+      if (latestQueueData) render(latestQueueData);
+    }
+    document.querySelectorAll('[data-queue-tab]').forEach((button) => {
+      button.addEventListener('click', () => selectQueueTab(button.dataset.queueTab));
+    });
     function render(data) {
+      latestQueueData = data;
       const counts = data.counts || {};
       const active = Number(counts.active || 0);
       const activeLimit = Number(counts.active_limit || 3);
@@ -424,8 +533,16 @@
       $('#countCompleted').textContent = counts.completed || 0;
 
       const candidates = data.extract_candidates || [];
-      $('#extractCandidateState').textContent = `${t('candidateCount', {count: candidates.length})} · ${t('activeSummary', {active, limit: activeLimit})}`;
-      $('#extractCandidateBody').innerHTML = candidates.map((candidate) => {
+      const pending = data.pending || [];
+      const history = (data.mine || []).filter((task) => ['scanned', 'completed'].includes(task.status));
+      if (!activeQueueTab) selectQueueTab(pending.length ? 'pending' : 'extract');
+      $('#extractTabCount').textContent = candidates.length;
+      $('#pendingTabCount').textContent = pending.length;
+      $('#historyTabCount').textContent = history.length;
+      $('#queueState').textContent = t('activeSummary', {active, limit: activeLimit});
+
+      const candidatePage = pageItems(candidates, 'extract');
+      $('#extractCandidateBody').innerHTML = candidatePage.items.map((candidate) => {
         const status = candidate.extract_link_status || 'ready';
         const inProgress = ['queued', 'running'].includes(status);
         const failed = status === 'failed';
@@ -443,6 +560,7 @@
         </tr>`;
       }).join('');
       $('#extractCandidateEmpty').style.display = candidates.length ? 'none' : 'block';
+      renderPagination('extractPagination', 'extract', candidatePage);
 
       const claimed = (data.mine || []).filter((task) => task.status === 'claimed');
       $('#currentTasks').innerHTML = claimed.length ? `<div class="current-grid">${claimed.map((task) => `
@@ -463,8 +581,8 @@
           </div>
         </article>`).join('')}</div>` : `<div class="empty">${esc(t('noCurrentTasks'))}</div>`;
 
-      const pending = data.pending || [];
-      $('#pendingBody').innerHTML = pending.map((task) => `
+      const pendingPage = pageItems(pending, 'pending');
+      $('#pendingBody').innerHTML = pendingPage.items.map((task) => `
         <tr>
           <td>#${esc(task.id)}</td>
           <td>${esc(task.email)}</td>
@@ -473,9 +591,10 @@
           <td><button class="primary" ${atLimit ? 'disabled' : ''} onclick="claimTask(${Number(task.id)}, this)">${esc(atLimit ? t('limitReached') : t('claim'))}</button></td>
         </tr>`).join('');
       $('#pendingEmpty').style.display = pending.length ? 'none' : 'block';
+      renderPagination('pendingPagination', 'pending', pendingPage);
 
-      const history = (data.mine || []).filter((task) => ['scanned', 'completed'].includes(task.status));
-      $('#historyBody').innerHTML = history.map((task) => `
+      const historyPage = pageItems(history, 'history');
+      $('#historyBody').innerHTML = historyPage.items.map((task) => `
         <tr>
           <td>#${esc(task.id)}</td>
           <td>${esc(task.email)}</td>
@@ -484,6 +603,8 @@
           <td>${esc(fmtDate(task.completed_at))}</td>
         </tr>`).join('');
       $('#historyEmpty').style.display = history.length ? 'none' : 'block';
+      renderPagination('historyPagination', 'history', historyPage);
+      selectQueueTab(activeQueueTab);
     }
     async function loadQueue(silent = false) {
       if (loading) return;
