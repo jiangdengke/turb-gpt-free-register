@@ -2253,15 +2253,37 @@ def create_app(auth_code: str | None = None) -> Flask:
     # ----------------------------------------------------------
     @app.get("/api/jobs")
     def api_jobs():
-        limit = request.args.get("limit", default=100, type=int)
+        page = request.args.get("page", type=int)
+        if page is None:
+            # 兼容旧客户端；新页面走下面的服务端分页分支。
+            limit = request.args.get("limit", default=100, type=int)
+            from config import email as _email_cfg
+            manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
+            rows = db.list_jobs(limit=limit)
+            retry_infos = svc.get_retry_info_batch(rows)
+            for row, retry_info in zip(rows, retry_infos):
+                row["manual_otp_required"] = manual_otp_required
+                row.update(retry_info)
+            return jsonify(rows)
+
+        limit = max(1, min(100, request.args.get("limit", default=20, type=int)))
+        page = max(1, page)
+        offset = (page - 1) * limit
         from config import email as _email_cfg
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
-        rows = db.list_jobs(limit=limit)
+        rows, total, active_count, pending_count = db.list_jobs_page(limit=limit, offset=offset)
         retry_infos = svc.get_retry_info_batch(rows)
         for row, retry_info in zip(rows, retry_infos):
             row["manual_otp_required"] = manual_otp_required
             row.update(retry_info)
-        return jsonify(rows)
+        return jsonify({
+            "items": rows,
+            "total": total,
+            "page": page,
+            "limit": limit,
+            "active_count": active_count,
+            "pending_count": pending_count,
+        })
 
     @app.post("/api/jobs")
     def api_jobs_create():

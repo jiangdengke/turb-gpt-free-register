@@ -723,6 +723,10 @@ let ACCOUNT_FILTER_COUNTS = {plus: 0, plus_trial: 0};
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
+let JOBS_TOTAL = 0;
+let JOB_ACTIVE_COUNT = 0;
+let JOB_PENDING_COUNT = 0;
+const JOB_CACHE = new Map();
 let jobsRenderSignature = '';
 let jobsRefreshInFlight = false;
 const JOB_SELECTED = new Set();
@@ -756,11 +760,19 @@ function _renderPager(id, total) {
 
 function pagerGo(id, dir) {
   PAGERS[id].page = Math.max(1, PAGERS[id].page + dir);
+  if (id === 'jobs') {
+    refreshJobs();
+    return;
+  }
   ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
 }
 function pagerSetSize(id, val) {
   PAGERS[id].size = parseInt(val, 10) || 20;
   PAGERS[id].page = 1;
+  if (id === 'jobs') {
+    refreshJobs();
+    return;
+  }
   ({ jobs: renderJobs, accounts: renderAccounts, outlook: renderOutlook, codex: renderCodex })[id]?.();
 }
 
@@ -845,11 +857,11 @@ async function loadSummary() {
 $('#btnStart').addEventListener('click', async () => {
   const count = parseInt($('#regCount').value || '1', 10);
   const workers = parseInt($('#regWorkers').value || '3', 10);
-  const active = JOBS.filter(j => ['pending','running','stopping'].includes(j.status));
-  if (active.length > 0) {
+  const active = JOB_ACTIVE_COUNT;
+  if (active > 0) {
     const ok = confirm(
-      `当前任务表里已有 ${active.length} 个任务在跑或排队，` +
-      `这次会再加 ${count} 个，合计 ${active.length + count} 个，确定继续？\n\n` +
+      `当前任务表里已有 ${active} 个任务在跑或排队，` +
+      `这次会再加 ${count} 个，合计 ${active + count} 个，确定继续？\n\n` +
       `（如果只是想跑这 ${count} 个，建议先点"取消所有排队"清掉残留再提交）`
     );
     if (!ok) return;
@@ -865,9 +877,7 @@ $('#btnStart').addEventListener('click', async () => {
 });
 $('#btnRefreshJobs').addEventListener('click', refreshJobs);
 $('#jobsSelectAll').addEventListener('change', (e) => {
-  const p = PAGERS.jobs;
-  const pageRows = JOBS.slice((p.page - 1) * p.size, p.page * p.size)
-    .filter(j => !['running','stopping'].includes(j.status));
+  const pageRows = JOBS.filter(j => !['running','stopping'].includes(j.status));
   if (e.target.checked) pageRows.forEach(j => JOB_SELECTED.add(Number(j.id)));
   else pageRows.forEach(j => JOB_SELECTED.delete(Number(j.id)));
   renderJobs();
@@ -875,7 +885,7 @@ $('#jobsSelectAll').addEventListener('change', (e) => {
 $('#btnDeleteSelectedJobs').addEventListener('click', deleteSelectedJobs);
 $('#btnRetrySelectedJobs').addEventListener('click', retrySelectedJobs);
 $('#btnCancelPending').addEventListener('click', async () => {
-  const pendingCount = JOBS.filter(j => j.status === 'pending').length;
+  const pendingCount = JOB_PENDING_COUNT;
   if (pendingCount === 0) { showToast('当前没有排队任务'); return; }
   if (!confirm(`确定取消 ${pendingCount} 个排队中的任务吗？已运行中的任务不受影响。`)) return;
   $('#btnCancelPending').disabled = true;
@@ -888,13 +898,8 @@ $('#btnCancelPending').addEventListener('click', async () => {
 });
 
 function renderJobs() {
-  const p = PAGERS.jobs;
-  const total = JOBS.length;
-  const rows = JOBS.slice((p.page - 1) * p.size, p.page * p.size);
-  const selectableIdsAll = new Set(JOBS.filter(j => !['running','stopping'].includes(j.status)).map(j => Number(j.id)));
-  for (const id of Array.from(JOB_SELECTED)) {
-    if (!selectableIdsAll.has(Number(id))) JOB_SELECTED.delete(id);
-  }
+  const total = JOBS_TOTAL;
+  const rows = JOBS;
   $('#jobsBody').innerHTML = rows.map(j => `
     <tr>
       <td><input type="checkbox" class="job-row-check" data-job-id="${esc(j.id)}" ${JOB_SELECTED.has(Number(j.id)) ? 'checked' : ''} ${['running','stopping'].includes(j.status) ? 'disabled title="运行中的任务不能选择"' : ''}></td>
@@ -928,14 +933,13 @@ function updateJobsSelectionUi(pageRows = null) {
   if (hint) hint.textContent = `已选 ${JOB_SELECTED.size}`;
   if (bulkBtn) bulkBtn.disabled = JOB_SELECTED.size === 0;
   if (bulkRetryBtn) {
-    bulkRetryBtn.disabled = !Array.from(JOB_SELECTED).some(id => JOBS.find(j => Number(j.id) === Number(id))?.retryable);
+    bulkRetryBtn.disabled = !Array.from(JOB_SELECTED).some(id => JOB_CACHE.get(Number(id))?.retryable);
   }
 
   const cbAll = $('#jobsSelectAll');
   if (!cbAll) return;
   if (!pageRows) {
-    const p = PAGERS.jobs;
-    pageRows = JOBS.slice((p.page - 1) * p.size, p.page * p.size);
+    pageRows = JOBS;
   }
   const selectableIds = pageRows.filter(j => !['running','stopping'].includes(j.status)).map(j => Number(j.id));
   const checkedCount = selectableIds.filter(id => JOB_SELECTED.has(id)).length;
@@ -950,9 +954,16 @@ async function refreshJobs() {
   const state = $('#jobsLoadState');
   if (state) state.textContent = '加载中…';
   try {
-    const nextJobs = await api('/api/jobs?limit=500');
-    const nextSignature = JSON.stringify(nextJobs);
+    const p = PAGERS.jobs;
+    const payload = await api(`/api/jobs?limit=${p.size}&page=${p.page}`);
+    const nextJobs = Array.isArray(payload) ? payload : (payload.items || []);
+    const nextTotal = Array.isArray(payload) ? nextJobs.length : Number(payload.total || nextJobs.length);
+    const nextSignature = JSON.stringify({page: p.page, total: nextTotal, items: nextJobs});
+    nextJobs.forEach(job => JOB_CACHE.set(Number(job.id), job));
     JOBS = nextJobs;
+    JOBS_TOTAL = nextTotal;
+    JOB_ACTIVE_COUNT = Array.isArray(payload) ? nextJobs.filter(j => ['pending','running','stopping'].includes(j.status)).length : Number(payload.active_count || 0);
+    JOB_PENDING_COUNT = Array.isArray(payload) ? nextJobs.filter(j => j.status === 'pending').length : Number(payload.pending_count || 0);
     if (nextSignature !== jobsRenderSignature) {
       jobsRenderSignature = nextSignature;
       renderJobs();
@@ -1079,7 +1090,7 @@ $('#jobsBody').addEventListener('change', (e) => {
 $('#btnCloseLog').addEventListener('click', closeLogModal);
 
 async function stopJob(jobId, btn) {
-  const job = JOBS.find(j => Number(j.id) === Number(jobId));
+  const job = JOB_CACHE.get(Number(jobId));
   const statusText = job?.status || '-';
   const emailText = job?.email || '未分配邮箱';
   if (!confirm(`确定停止任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n排队任务会直接取消；运行中的任务会发送停止信号，并在当前步骤检查点退出。`)) return;
@@ -1096,7 +1107,7 @@ async function stopJob(jobId, btn) {
 }
 
 async function deleteJob(jobId, btn) {
-  const job = JOBS.find(j => Number(j.id) === Number(jobId));
+  const job = JOB_CACHE.get(Number(jobId));
   const statusText = job?.status || '-';
   const emailText = job?.email || '未分配邮箱';
   if (!confirm(`确定删除任务 #${jobId}？\n\n状态：${statusText}\n邮箱：${emailText}\n\n会同时删除该任务日志。排队任务删除后将不会执行。`)) return;
@@ -1116,7 +1127,7 @@ async function deleteJob(jobId, btn) {
 async function deleteSelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
   if (ids.length === 0) { showToast('请先选择任务'); return; }
-  const selectedJobs = ids.map(id => JOBS.find(j => Number(j.id) === Number(id))).filter(Boolean);
+  const selectedJobs = ids.map(id => JOB_CACHE.get(Number(id))).filter(Boolean);
   const runningCount = selectedJobs.filter(j => ['running','stopping'].includes(j.status)).length;
   const deletableCount = selectedJobs.length - runningCount;
   if (deletableCount <= 0) { showToast('选中的任务都在运行中，不能删除'); return; }
@@ -1144,7 +1155,7 @@ async function deleteSelectedJobs() {
 }
 
 async function retryJob(jobId, btn) {
-  const job = JOBS.find(j => Number(j.id) === Number(jobId));
+  const job = JOB_CACHE.get(Number(jobId));
   if (!job || !job.retryable) { showToast('该任务当前不可重试'); return; }
   const actionText = job.retry_action === 'codex' ? '仅补跑 Codex 授权' : '创建新的完整注册任务';
   if (!confirm(`确定${job.retry_label || '重试'}任务 #${jobId}？\n\n${actionText}\n原任务记录和日志会保留。`)) return;
@@ -1166,7 +1177,7 @@ async function retryJob(jobId, btn) {
 
 async function retrySelectedJobs() {
   const ids = Array.from(JOB_SELECTED);
-  const retryable = ids.filter(id => JOBS.find(j => Number(j.id) === Number(id))?.retryable);
+  const retryable = ids.filter(id => JOB_CACHE.get(Number(id))?.retryable);
   if (retryable.length === 0) { showToast('选中的任务没有可重试项'); return; }
   if (!confirm(`确定重试选中的 ${retryable.length} 个任务吗？\n\n已创建账号的任务只补跑 Codex，其余任务重新入队注册。`)) return;
   const btn = $('#btnRetrySelectedJobs');

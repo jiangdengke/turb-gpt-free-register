@@ -2544,6 +2544,18 @@ def list_jobs(limit: int = 100) -> list[dict]:
         return [dict(r) for r in rows[:limit]]
 
 
+def list_jobs_page(limit: int = 20, offset: int = 0) -> tuple[list[dict], int, int, int]:
+    """读取任务分页数据，同时返回总数、活跃数和排队数。"""
+    with _LOCK:
+        rows = sorted(_load_jobs(), key=lambda x: int(x.get("id") or 0), reverse=True)
+        start = max(0, int(offset or 0))
+        size = max(1, int(limit or 20))
+        items = [dict(r) for r in rows[start:start + size]]
+        active_count = sum(1 for row in rows if row.get("status") in {"pending", "running", "stopping"})
+        pending_count = sum(1 for row in rows if row.get("status") == "pending")
+        return items, len(rows), active_count, pending_count
+
+
 def get_job(job_id: int) -> dict | None:
     with _LOCK:
         row = next((r for r in _load_jobs() if int(r.get("id") or 0) == int(job_id)), None)

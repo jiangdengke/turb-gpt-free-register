@@ -10,6 +10,21 @@ from core import registration_service
 
 
 class RegistrationRecoveryTests(unittest.TestCase):
+    def test_lists_jobs_page_with_counts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            jobs_path = Path(tmp) / "jobs.json"
+            jobs_path.write_text(json.dumps([
+                {"id": 1, "status": "pending"},
+                {"id": 2, "status": "running"},
+                {"id": 3, "status": "failed"},
+            ]), encoding="utf-8")
+
+            with patch.object(db, "_JOBS_JSON", jobs_path):
+                rows, total, active, pending = db.list_jobs_page(limit=2, offset=1)
+
+            self.assertEqual([row["id"] for row in rows], [2, 1])
+            self.assertEqual((total, active, pending), (3, 2, 1))
+
     def test_batch_retry_info_matches_single_task_rules(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
