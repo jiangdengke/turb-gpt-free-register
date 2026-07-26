@@ -3580,7 +3580,7 @@ loadSummary();
 activateTab(localStorage.getItem('gpt_console_active_tab') || 'register', false);
 jobsTimer = setInterval(() => { if (!$('#tab-register').classList.contains('hidden')) refreshJobs(); }, 3000);
 setInterval(loadSummary, 5000);
-setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 2000);
+setInterval(() => { if (!$('#tab-accounts').classList.contains('hidden')) pollAccountPlanStatuses(); }, 10000);
 setInterval(() => { if (!$('#tab-scanners').classList.contains('hidden')) loadScanners(); }, 5000);
 </script>
 </body>
