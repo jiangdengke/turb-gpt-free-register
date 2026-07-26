@@ -360,6 +360,16 @@ def enqueue_account_extract(
             scanner_id=scanner_id,
         ):
             _QUEUE_SLOTS.release()
+            if (
+                scanner_id is not None
+                and db.scanner_active_claim_count(scanner_id) >= db.scanner_active_claim_limit()
+            ):
+                return {
+                    "accepted": False,
+                    "busy": True,
+                    "limit_reached": True,
+                    "error": f"每个扫码员最多同时领取 {db.scanner_active_claim_limit()} 个任务",
+                }
             return {"accepted": False, "busy": True, "error": "该账号正在提链中或已有有效扫码任务"}
         fut = _EXECUTOR.submit(_run_extract, account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger)
         return {"accepted": True, "busy": False, "future": fut, "link_type": lt}

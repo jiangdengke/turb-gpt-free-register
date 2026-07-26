@@ -46,6 +46,7 @@ _CODEX_EXPORT_STATE = _PROJECT_ROOT / "codex_导出状态.json"
 _SCANNERS_JSON = _PROJECT_ROOT / "扫码员.json"
 _SCAN_TASKS_JSON = _PROJECT_ROOT / "扫码任务.json"
 _SCAN_LEASE_SECONDS = 600
+_SCAN_MAX_ACTIVE_TASKS = 3
 
 _LEGACY_SQLITE = _LEGACY_DATA_DIR / "registrations.db"
 _LEGACY_OUTLOOK_JSON = _LEGACY_DATA_DIR / "outlook_accounts.json"
@@ -1280,6 +1281,11 @@ def claim_account_extract(
             ), None)
             if scanner is None:
                 return False
+            tasks = _load_scan_tasks()
+            if _sync_scan_tasks_locked(accounts, tasks):
+                _save_scan_tasks(tasks)
+            if _scanner_active_claim_count_locked(int(scanner_id), accounts, tasks) >= _SCAN_MAX_ACTIVE_TASKS:
+                return False
             expires_ts = _extract_link_expiry_timestamp(row.get("extract_link_expires_at"))
             if _account_has_scannable_link(row) and (expires_ts is None or expires_ts > time.time()):
                 return False
@@ -1602,6 +1608,38 @@ def list_scan_tasks_admin(limit: int = 500) -> list[dict]:
         ]
 
 
+def _scanner_active_claim_count_locked(
+    scanner_id: int,
+    accounts: list[dict],
+    tasks: list[dict],
+) -> int:
+    scanner_id = int(scanner_id)
+    task_count = sum(
+        int(task.get("scanner_id") or 0) == scanner_id
+        and task.get("status") in {"claimed", "scanned"}
+        for task in tasks
+    )
+    extract_count = sum(
+        int(account.get("extract_link_scanner_id") or 0) == scanner_id
+        and account.get("extract_link_status") in {"queued", "running"}
+        for account in accounts
+    )
+    return task_count + extract_count
+
+
+def scanner_active_claim_limit() -> int:
+    return _SCAN_MAX_ACTIVE_TASKS
+
+
+def scanner_active_claim_count(scanner_id: int) -> int:
+    with _LOCK:
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        if _sync_scan_tasks_locked(accounts, tasks):
+            _save_scan_tasks(tasks)
+        return _scanner_active_claim_count_locked(int(scanner_id), accounts, tasks)
+
+
 def _scanner_extract_candidates(
     accounts: list[dict],
     tasks: list[dict],
@@ -1610,6 +1648,8 @@ def _scanner_extract_candidates(
 ) -> list[dict]:
     """返回扫码员可发起提链的账号，以及该扫码员正在提链的账号。"""
     now_ts = time.time()
+    active_count = _scanner_active_claim_count_locked(int(scanner_id), accounts, tasks)
+    at_limit = active_count >= _SCAN_MAX_ACTIVE_TASKS
     active_account_ids = {
         int(task.get("account_id") or 0)
         for task in tasks
@@ -1646,7 +1686,8 @@ def _scanner_extract_candidates(
             "extract_link_type": account.get("extract_link_type") or "",
             "extract_link_message": account.get("extract_link_error") or account.get("extract_link_message") or "",
             "owned": owner_id == int(scanner_id),
-            "can_extract": not in_progress,
+            "can_extract": not in_progress and not at_limit,
+            "limit_reached": not in_progress and at_limit,
         })
 
     rows.sort(key=lambda item: (
@@ -1695,14 +1736,20 @@ def get_scanner_queue(scanner_id: int) -> dict:
             )
         ]
         extract_candidates = _scanner_extract_candidates(accounts, tasks, int(scanner_id))
+        active_count = _scanner_active_claim_count_locked(int(scanner_id), accounts, tasks)
         return {
             "scanner": _public_scanner(scanner),
             "extract_candidates": extract_candidates,
             "pending": pending,
             "mine": mine,
             "counts": {
+                "active": active_count,
+                "active_limit": _SCAN_MAX_ACTIVE_TASKS,
                 "extractable": sum(bool(item.get("can_extract")) for item in extract_candidates),
-                "extracting": sum(not bool(item.get("can_extract")) for item in extract_candidates),
+                "extracting": sum(
+                    item.get("extract_link_status") in {"queued", "running"}
+                    for item in extract_candidates
+                ),
                 "pending": len(pending),
                 "claimed": sum(task.get("status") == "claimed" for task in mine),
                 "scanned": sum(task.get("status") == "scanned" for task in mine),
@@ -1733,6 +1780,10 @@ def claim_scan_task(task_id: int, scanner_id: int, lease_seconds: int = _SCAN_LE
             if changed:
                 _save_scan_tasks(tasks)
             raise RuntimeError("该任务已被领取或已结束")
+        if _scanner_active_claim_count_locked(int(scanner_id), accounts, tasks) >= _SCAN_MAX_ACTIVE_TASKS:
+            if changed:
+                _save_scan_tasks(tasks)
+            raise RuntimeError(f"每个扫码员最多同时领取 {_SCAN_MAX_ACTIVE_TASKS} 个任务")
         now_ts = time.time()
         lease_end = now_ts + max(60, min(int(lease_seconds), 3600))
         expires_ts = float(task.get("link_expires_ts") or 0)

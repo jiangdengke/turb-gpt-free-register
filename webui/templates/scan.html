@@ -300,6 +300,7 @@
         candidateCount: '共 {count} 个', extractReady: '可提链', extracting: '提链中', extractFailed: '提链失败',
         linkExpired: '链接已过期', extractAndClaim: '提链并领取', retryExtract: '重试提链',
         confirmExtract: '确定提链并领取该账号吗？成功提链会消耗 1 次 CDK。', extractQueued: '提链任务已提交',
+        activeSummary: '当前 {active}/{limit}', limitReached: '已达上限',
       },
       hi: {
         title: 'स्कैन कार्यक्षेत्र', logout: 'लॉग आउट', pending: 'लंबित',
@@ -319,6 +320,7 @@
         candidateCount: 'कुल {count}', extractReady: 'तैयार', extracting: 'लिंक बन रहा है', extractFailed: 'लिंक विफल',
         linkExpired: 'लिंक समाप्त', extractAndClaim: 'लिंक बनाएँ और लें', retryExtract: 'फिर से प्रयास करें',
         confirmExtract: 'इस खाते का लिंक बनाकर कार्य लेना है? सफल लिंक पर 1 CDK उपयोग होगा।', extractQueued: 'लिंक कार्य जमा हुआ',
+        activeSummary: 'वर्तमान {active}/{limit}', limitReached: 'सीमा पूरी',
       },
       en: {
         title: 'Scan Workbench', logout: 'Log out', pending: 'Pending',
@@ -338,6 +340,7 @@
         candidateCount: '{count} accounts', extractReady: 'Ready', extracting: 'Creating link', extractFailed: 'Link failed',
         linkExpired: 'Link expired', extractAndClaim: 'Create and claim', retryExtract: 'Retry link',
         confirmExtract: 'Create the payment link and claim this account? A successful link uses 1 CDK.', extractQueued: 'Link task submitted',
+        activeSummary: 'Active {active}/{limit}', limitReached: 'Limit reached',
       },
     };
     const savedLocale = localStorage.getItem(LOCALE_KEY);
@@ -412,18 +415,22 @@
     }
     function render(data) {
       const counts = data.counts || {};
+      const active = Number(counts.active || 0);
+      const activeLimit = Number(counts.active_limit || 3);
+      const atLimit = active >= activeLimit;
       $('#countPending').textContent = counts.pending || 0;
-      $('#countClaimed').textContent = counts.claimed || 0;
+      $('#countClaimed').textContent = `${active} / ${activeLimit}`;
       $('#countScanned').textContent = (counts.claimed || 0) + (counts.scanned || 0);
       $('#countCompleted').textContent = counts.completed || 0;
 
       const candidates = data.extract_candidates || [];
-      $('#extractCandidateState').textContent = t('candidateCount', {count: candidates.length});
+      $('#extractCandidateState').textContent = `${t('candidateCount', {count: candidates.length})} · ${t('activeSummary', {active, limit: activeLimit})}`;
       $('#extractCandidateBody').innerHTML = candidates.map((candidate) => {
         const status = candidate.extract_link_status || 'ready';
         const inProgress = ['queued', 'running'].includes(status);
         const failed = status === 'failed';
         const expired = status === 'success';
+        const limitReached = Boolean(candidate.limit_reached);
         const statusText = inProgress ? t('extracting') : failed ? t('extractFailed') : expired ? t('linkExpired') : t('extractReady');
         const statusClass = failed ? 'status-failed' : inProgress ? 'status-claimed' : 'status-pending';
         const buttonText = failed || expired ? t('retryExtract') : t('extractAndClaim');
@@ -432,7 +439,7 @@
           <td><strong>${esc(candidate.email)}</strong>${message ? `<div class="muted candidate-message" title="${esc(message)}">${esc(message)}</div>` : ''}</td>
           <td><span class="pill ${statusClass}">${esc(statusText)}</span></td>
           <td>${esc((candidate.extract_link_type || 'UPI').toUpperCase())}</td>
-          <td><button class="good" ${candidate.can_extract ? '' : 'disabled'} onclick="extractAccount(${Number(candidate.account_id)}, this)">${esc(inProgress ? t('extracting') : buttonText)}</button></td>
+          <td><button class="good" ${candidate.can_extract ? '' : 'disabled'} onclick="extractAccount(${Number(candidate.account_id)}, this)">${esc(inProgress ? t('extracting') : limitReached ? t('limitReached') : buttonText)}</button></td>
         </tr>`;
       }).join('');
       $('#extractCandidateEmpty').style.display = candidates.length ? 'none' : 'block';
@@ -463,7 +470,7 @@
           <td>${esc(task.email)}</td>
           <td>${esc(task.payment_method || task.link_type || '-')}</td>
           <td>${esc(fmtDate(task.link_expires_at))}</td>
-          <td><button class="primary" onclick="claimTask(${Number(task.id)}, this)">${esc(t('claim'))}</button></td>
+          <td><button class="primary" ${atLimit ? 'disabled' : ''} onclick="claimTask(${Number(task.id)}, this)">${esc(atLimit ? t('limitReached') : t('claim'))}</button></td>
         </tr>`).join('');
       $('#pendingEmpty').style.display = pending.length ? 'none' : 'block';
 

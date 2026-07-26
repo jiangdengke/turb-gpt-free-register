@@ -28,10 +28,10 @@ def _account(*, plan: str = "free", job_id: str = "job-1") -> dict:
     }
 
 
-def _extract_candidate() -> dict:
+def _extract_candidate(account_id: int = 52) -> dict:
     return {
-        "id": 52,
-        "email": "candidate-scanner@example.com",
+        "id": account_id,
+        "email": f"candidate-{account_id}@example.com",
         "current_plan_type": "free",
         "plus_trial_eligible": True,
         "access_token": "fixture-access-token",
@@ -177,6 +177,57 @@ class ScannerPersistenceTests(unittest.TestCase):
         self.assertEqual(claimed["scanner_id"], scanner["id"])
         self.assertEqual(claimed["qr_url"], "https://fixture.invalid/scanner-job.png")
         self.assertGreater(claimed["lease_expires_at"], time.time())
+
+    def test_scanner_can_hold_at_most_three_scan_tasks(self):
+        scanner, _ = db.create_scanner("扫码员 A")
+        accounts = []
+        for account_id in range(101, 105):
+            account = _account(job_id=f"job-{account_id}")
+            account["id"] = account_id
+            account["email"] = f"scan-{account_id}@example.com"
+            accounts.append(account)
+        db._write_json(db._ACCOUNTS_JSON, accounts)
+
+        task_ids = [item["id"] for item in db.get_scanner_queue(scanner["id"])["pending"]]
+        for task_id in task_ids[:3]:
+            db.claim_scan_task(task_id, scanner["id"])
+        with self.assertRaisesRegex(RuntimeError, "最多同时领取 3 个"):
+            db.claim_scan_task(task_ids[3], scanner["id"])
+
+        queue = db.get_scanner_queue(scanner["id"])
+        self.assertEqual(queue["counts"]["active"], 3)
+        self.assertEqual(queue["counts"]["active_limit"], 3)
+
+        db.update_scan_task_by_scanner(task_ids[0], scanner["id"], "release")
+        claimed = db.claim_scan_task(task_ids[3], scanner["id"])
+        self.assertEqual(claimed["status"], "claimed")
+
+    def test_scanner_extract_claims_share_the_three_task_limit(self):
+        scanner, _ = db.create_scanner("扫码员 A")
+        db._write_json(db._ACCOUNTS_JSON, [
+            _extract_candidate(account_id) for account_id in range(201, 205)
+        ])
+
+        for account_id in range(201, 204):
+            self.assertTrue(db.claim_account_extract(
+                account_id,
+                trigger=f"scanner:{scanner['id']}",
+                link_type="upi",
+                scanner_id=scanner["id"],
+            ))
+        self.assertFalse(db.claim_account_extract(
+            204,
+            trigger=f"scanner:{scanner['id']}",
+            link_type="upi",
+            scanner_id=scanner["id"],
+        ))
+
+        queue = db.get_scanner_queue(scanner["id"])
+        blocked = next(item for item in queue["extract_candidates"] if item["account_id"] == 204)
+        self.assertEqual(queue["counts"]["active"], 3)
+        self.assertEqual(queue["counts"]["extracting"], 3)
+        self.assertTrue(blocked["limit_reached"])
+        self.assertFalse(blocked["can_extract"])
 
 
 class ScannerRoleTests(unittest.TestCase):
