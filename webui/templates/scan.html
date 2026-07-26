@@ -67,6 +67,17 @@
     .good { color: #166534; border-color: #78ba93; background: var(--soft-green); }
     .danger { color: #b3261e; border-color: #efa8a2; background: var(--soft-red); }
     header button { border-color: #53657c; background: #17243a; color: #fff; }
+    header select {
+      min-height: 34px;
+      border: 1px solid #53657c;
+      border-radius: 6px;
+      background: #17243a;
+      color: #fff;
+      padding: 0 10px;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 800;
+    }
     main {
       width: min(1280px, calc(100vw - 32px));
       margin: 18px auto 32px;
@@ -198,49 +209,56 @@
   <header>
     <div class="header-inner">
       <div>
-        <h1>扫码工作台</h1>
+        <h1 data-i18n="title">扫码工作台</h1>
         <p class="identity">{{ scanner_name }}</p>
       </div>
-      <form method="post" action="/logout"><button type="submit">退出</button></form>
+      <div class="actions">
+        <select id="localeSelect" aria-label="Language">
+          <option value="zh">中文</option>
+          <option value="hi">हिन्दी</option>
+          <option value="en">English</option>
+        </select>
+        <form method="post" action="/logout"><button type="submit" data-i18n="logout">退出</button></form>
+      </div>
     </div>
   </header>
 
   <main>
     <div class="stats">
-      <div class="stat"><span>待领取</span><strong id="countPending">0</strong></div>
-      <div class="stat"><span>我已领取</span><strong id="countClaimed">0</strong></div>
-      <div class="stat"><span>自动检测中</span><strong id="countScanned">0</strong></div>
-      <div class="stat"><span>已开通</span><strong id="countCompleted">0</strong></div>
+      <div class="stat"><span data-i18n="pending">待领取</span><strong id="countPending">0</strong></div>
+      <div class="stat"><span data-i18n="claimed">我已领取</span><strong id="countClaimed">0</strong></div>
+      <div class="stat"><span data-i18n="checking">自动检测中</span><strong id="countScanned">0</strong></div>
+      <div class="stat"><span data-i18n="completed">已开通</span><strong id="countCompleted">0</strong></div>
     </div>
 
     <section>
       <div class="section-head">
-        <h2>我已领取</h2>
-        <span class="muted" id="refreshState">加载中</span>
+        <h2 data-i18n="myTasks">我已领取</h2>
+        <span class="muted" id="refreshState" data-i18n="loading">加载中</span>
       </div>
       <div id="currentTasks"></div>
     </section>
 
     <section>
-      <div class="section-head"><h2>待领取</h2></div>
+      <div class="section-head"><h2 data-i18n="pendingTasks">待领取</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>任务</th><th>账号</th><th>方式</th><th>链接到期</th><th>操作</th></tr></thead>
+          <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="method">方式</th><th data-i18n="linkExpires">链接到期</th><th data-i18n="actions">操作</th></tr></thead>
           <tbody id="pendingBody"></tbody>
         </table>
       </div>
-      <div class="empty" id="pendingEmpty">暂无待领取任务</div>
+      <div class="empty" id="pendingEmpty" data-i18n="noPending">暂无待领取任务</div>
     </section>
 
     <section>
-      <div class="section-head"><h2>我的记录</h2></div>
+      <div class="section-head"><h2 data-i18n="history">我的记录</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>检测时间</th><th>完成时间</th></tr></thead>
+          <thead><tr><th data-i18n="task">任务</th><th data-i18n="account">账号</th><th data-i18n="status">状态</th><th data-i18n="detectedAt">检测时间</th><th data-i18n="completedAt">完成时间</th></tr></thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>
-      <div class="empty" id="historyEmpty">暂无扫码记录</div>
+      <div class="empty" id="historyEmpty" data-i18n="noHistory">暂无扫码记录</div>
     </section>
   </main>
   <div id="toast"></div>
@@ -248,6 +266,79 @@
   <script>
     const $ = (s) => document.querySelector(s);
     let loading = false;
+    const LOCALE_KEY = 'scanner-locale';
+    const I18N = {
+      zh: {
+        title: '扫码工作台', logout: '退出', pending: '待领取', claimed: '我已领取',
+        checking: '自动检测中', completed: '已开通', myTasks: '我已领取',
+        pendingTasks: '待领取', task: '任务', account: '账号', method: '方式',
+        linkExpires: '链接到期', actions: '操作', status: '状态', detectedAt: '检测时间',
+        completedAt: '完成时间', history: '我的记录', noPending: '暂无待领取任务',
+        noHistory: '暂无扫码记录', noCurrentTasks: '当前没有已领取任务', loading: '加载中', updatedAt: '更新于',
+        updateFailed: '更新失败', autoDetecting: '自动检测中', noQr: '当前任务没有二维码图片',
+        openLinkHint: '请打开支付链接', taskNumber: '任务 #', lease: '领取租约',
+        linkExpiry: '链接到期', openPayment: '打开支付链接', release: '释放',
+        claim: '领取', claimedTask: '已领取任务 #{id}', released: '任务已释放',
+        qrAlt: '任务 {id} 支付二维码', expired: '已过期', superseded: '已替换',
+      },
+      hi: {
+        title: 'स्कैन कार्यक्षेत्र', logout: 'लॉग आउट', pending: 'लंबित',
+        claimed: 'मेरे लिए लिया गया', checking: 'स्वचालित जाँच जारी',
+        completed: 'सक्रिय', myTasks: 'मेरे कार्य', pendingTasks: 'लंबित कार्य',
+        task: 'कार्य', account: 'खाता', method: 'विधि', linkExpires: 'लिंक समाप्ति',
+        actions: 'कार्रवाई', status: 'स्थिति', detectedAt: 'जाँच समय',
+        completedAt: 'पूर्ण समय', history: 'मेरी गतिविधि', noPending: 'कोई लंबित कार्य नहीं',
+        noHistory: 'कोई रिकॉर्ड नहीं', noCurrentTasks: 'कोई सक्रिय कार्य नहीं', loading: 'लोड हो रहा है', updatedAt: 'अपडेट',
+        updateFailed: 'अपडेट विफल', autoDetecting: 'स्वचालित जाँच जारी',
+        noQr: 'इस कार्य में QR कोड चित्र नहीं है', openLinkHint: 'भुगतान लिंक खोलें',
+        taskNumber: 'कार्य #', lease: 'लिया गया समय', linkExpiry: 'लिंक समाप्ति',
+        openPayment: 'भुगतान लिंक खोलें', release: 'रिलीज़', claim: 'लें',
+        claimedTask: 'कार्य #{id} लिया गया', released: 'कार्य रिलीज़ किया गया',
+        qrAlt: 'कार्य {id} का भुगतान QR कोड', expired: 'समाप्त', superseded: 'बदला गया',
+      },
+      en: {
+        title: 'Scan Workbench', logout: 'Log out', pending: 'Pending',
+        claimed: 'Claimed by me', checking: 'Auto-checking', completed: 'Activated',
+        myTasks: 'My tasks', pendingTasks: 'Pending tasks', task: 'Task',
+        account: 'Account', method: 'Method', linkExpires: 'Link expires',
+        actions: 'Actions', status: 'Status', detectedAt: 'Detected at',
+        completedAt: 'Completed at', history: 'My history', noPending: 'No pending tasks',
+        noHistory: 'No scan records', noCurrentTasks: 'No active tasks', loading: 'Loading', updatedAt: 'Updated at',
+        updateFailed: 'Update failed', autoDetecting: 'Auto-checking',
+        noQr: 'This task has no QR image', openLinkHint: 'Open the payment link',
+        taskNumber: 'Task #', lease: 'Claim lease', linkExpiry: 'Link expires',
+        openPayment: 'Open payment link', release: 'Release', claim: 'Claim',
+        claimedTask: 'Task #{id} claimed', released: 'Task released',
+        qrAlt: 'Payment QR code for task {id}', expired: 'Expired', superseded: 'Replaced',
+      },
+    };
+    const savedLocale = localStorage.getItem(LOCALE_KEY);
+    let locale = savedLocale || (
+      (navigator.language || '').toLowerCase().startsWith('hi') ? 'hi' : 'zh'
+    );
+    if (!I18N[locale]) locale = 'zh';
+    function t(key, vars = {}) {
+      let value = I18N[locale][key] || I18N.zh[key] || key;
+      return value.replace(/\{(\w+)\}/g, (_, name) => String(vars[name] ?? ''));
+    }
+    function localeTag() {
+      return locale === 'hi' ? 'hi-IN' : locale === 'en' ? 'en-US' : 'zh-CN';
+    }
+    function applyLocale() {
+      document.documentElement.lang = locale === 'hi' ? 'hi' : locale;
+      document.title = t('title');
+      document.querySelectorAll('[data-i18n]').forEach((el) => {
+        el.textContent = t(el.dataset.i18n);
+      });
+      $('#localeSelect').value = locale;
+    }
+    $('#localeSelect').addEventListener('change', () => {
+      locale = $('#localeSelect').value;
+      localStorage.setItem(LOCALE_KEY, locale);
+      applyLocale();
+      loadQueue(true);
+    });
+    applyLocale();
 
     function esc(v) {
       return String(v == null || v === '' ? '-' : v)
@@ -260,10 +351,13 @@
       const d = Number.isFinite(numeric) && numeric > 0
         ? new Date(numeric > 1e12 ? numeric : numeric * 1000)
         : new Date(v);
-      return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
+      return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString(localeTag());
     }
     function statusLabel(status) {
-      return {pending:'待领取', claimed:'已领取', scanned:'检测中', completed:'已开通'}[status] || status || '-';
+      return {
+        pending: t('pending'), claimed: t('claimed'), scanned: t('checking'),
+        completed: t('completed'), expired: t('expired'), superseded: t('superseded'),
+      }[status] || status || '-';
     }
     function showToast(text) {
       const toast = $('#toast');
@@ -299,20 +393,20 @@
       $('#currentTasks').innerHTML = claimed.length ? `<div class="current-grid">${claimed.map((task) => `
         <article class="task-card">
           ${task.qr_url
-            ? `<img class="qr" src="${esc(task.qr_url)}" alt="任务 ${esc(task.id)} 支付二维码" referrerpolicy="no-referrer">`
-            : `<div class="qr-empty">当前任务没有二维码图片<br>请打开支付链接</div>`}
+            ? `<img class="qr" src="${esc(task.qr_url)}" alt="${esc(t('qrAlt', {id: task.id}))}" referrerpolicy="no-referrer">`
+            : `<div class="qr-empty">${esc(t('noQr'))}<br>${esc(t('openLinkHint'))}</div>`}
           <div class="task-meta">
-            <div><span class="pill status-claimed">自动检测中 · 任务 #${esc(task.id)}</span></div>
+            <div><span class="pill status-claimed">${esc(t('autoDetecting'))} · ${esc(t('taskNumber'))}${esc(task.id)}</span></div>
             <div class="email">${esc(task.email)}</div>
-            <div class="meta-row">方式：${esc(task.payment_method || task.link_type || '-')}</div>
-            <div class="meta-row">领取租约：<span class="countdown" data-countdown="${esc(task.lease_expires_at)}">${remaining(task.lease_expires_at)}</span></div>
-            <div class="meta-row">链接到期：${esc(fmtDate(task.link_expires_at))}</div>
+            <div class="meta-row">${esc(t('method'))}：${esc(task.payment_method || task.link_type || '-')}</div>
+            <div class="meta-row">${esc(t('lease'))}：<span class="countdown" data-countdown="${esc(task.lease_expires_at)}">${remaining(task.lease_expires_at)}</span></div>
+            <div class="meta-row">${esc(t('linkExpiry'))}：${esc(fmtDate(task.link_expires_at))}</div>
             <div class="actions">
-              ${task.payment_url ? `<a class="link-button" href="${esc(task.payment_url)}" target="_blank" rel="noopener noreferrer">打开支付链接</a>` : ''}
-              <button class="danger" onclick="taskAction(${Number(task.id)}, 'release', this)">释放</button>
+              ${task.payment_url ? `<a class="link-button" href="${esc(task.payment_url)}" target="_blank" rel="noopener noreferrer">${esc(t('openPayment'))}</a>` : ''}
+              <button class="danger" onclick="taskAction(${Number(task.id)}, 'release', this)">${esc(t('release'))}</button>
             </div>
           </div>
-        </article>`).join('')}</div>` : '<div class="empty">当前没有已领取任务</div>';
+        </article>`).join('')}</div>` : `<div class="empty">${esc(t('noCurrentTasks'))}</div>`;
 
       const pending = data.pending || [];
       $('#pendingBody').innerHTML = pending.map((task) => `
@@ -321,7 +415,7 @@
           <td>${esc(task.email)}</td>
           <td>${esc(task.payment_method || task.link_type || '-')}</td>
           <td>${esc(fmtDate(task.link_expires_at))}</td>
-          <td><button class="primary" onclick="claimTask(${Number(task.id)}, this)">领取</button></td>
+          <td><button class="primary" onclick="claimTask(${Number(task.id)}, this)">${esc(t('claim'))}</button></td>
         </tr>`).join('');
       $('#pendingEmpty').style.display = pending.length ? 'none' : 'block';
 
@@ -342,9 +436,9 @@
       try {
         const data = await api('/api/scan/queue');
         render(data);
-        $('#refreshState').textContent = `更新于 ${new Date().toLocaleTimeString()}`;
+        $('#refreshState').textContent = `${t('updatedAt')} ${new Date().toLocaleTimeString(localeTag())}`;
       } catch (error) {
-        $('#refreshState').textContent = '更新失败';
+        $('#refreshState').textContent = t('updateFailed');
         if (!silent) showToast(error.message);
       } finally {
         loading = false;
@@ -354,7 +448,7 @@
       button.disabled = true;
       try {
         await api(`/api/scan/tasks/${id}/claim`, {method:'POST'});
-        showToast(`已领取任务 #${id}`);
+        showToast(t('claimedTask', {id}));
         await loadQueue();
       } catch (error) {
         showToast(error.message);
@@ -371,7 +465,7 @@
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({action}),
         });
-        showToast('任务已释放');
+        showToast(t('released'));
         await loadQueue();
       } catch (error) {
         showToast(error.message);
