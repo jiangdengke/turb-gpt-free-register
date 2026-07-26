@@ -482,20 +482,23 @@ def _account_for_job(job: dict) -> dict | None:
     return db.get_account_by_email(email) if email else None
 
 
-def get_retry_info(job: dict) -> dict:
-    """返回给 API/UI 的重试能力描述，不依赖前端猜测错误阶段。"""
+def _empty_retry_info(job: dict) -> dict:
     status = str(job.get("status") or "")
-    info = {
+    return {
         "retryable": False,
         "retry_action": None,
         "retry_label": None,
         "retry_reason": None,
         "display_status": status,
     }
+
+def _build_retry_info(job: dict, account: dict | None, successful_retry: dict | None) -> dict:
+    """用已加载的数据生成单条任务的重试描述。"""
+    status = str(job.get("status") or "")
+    info = _empty_retry_info(job)
     if status not in ("failed", "stopped", "cancelled"):
         return info
 
-    successful_retry = db.get_successful_retry_for_job(int(job.get("id") or 0))
     if successful_retry is not None:
         info["retry_reason"] = f"后续重试任务 #{successful_retry.get('id')} 已成功"
         info["successful_retry_job_id"] = successful_retry.get("id")
@@ -526,6 +529,50 @@ def get_retry_info(job: dict) -> dict:
         "retry_label": "重试",
     })
     return info
+
+
+def get_retry_info(job: dict) -> dict:
+    """返回给 API/UI 的重试能力描述，不依赖前端猜测错误阶段。"""
+    status = str(job.get("status") or "")
+    if status not in ("failed", "stopped", "cancelled"):
+        return _empty_retry_info(job)
+    successful_retry = db.get_successful_retry_for_job(int(job.get("id") or 0))
+    account = _account_for_job(job)
+    return _build_retry_info(job, account, successful_retry)
+
+
+def get_retry_info_batch(jobs: list[dict]) -> list[dict]:
+    """批量生成任务重试信息，避免每条任务重复解析整个 JSON 文件。"""
+    terminal_statuses = {"failed", "stopped", "cancelled"}
+    terminal_jobs = [job for job in jobs if str(job.get("status") or "") in terminal_statuses]
+    retry_ids = []
+    for job in terminal_jobs:
+        try:
+            retry_ids.append(int(job.get("id") or 0))
+        except (TypeError, ValueError):
+            continue
+    successful_retries = db.get_successful_retry_map_for_jobs(retry_ids)
+    accounts_by_id, accounts_by_email = db.get_retry_account_index() if terminal_jobs else ({}, {})
+
+    result = []
+    for job in jobs:
+        if str(job.get("status") or "") not in terminal_statuses:
+            result.append(_empty_retry_info(job))
+            continue
+        account = None
+        try:
+            account = accounts_by_id.get(int(job.get("account_id") or 0))
+        except (TypeError, ValueError):
+            pass
+        if account is None:
+            email = str(job.get("email") or "").strip().lower()
+            account = accounts_by_email.get(email) if email else None
+        try:
+            job_id = int(job.get("id") or 0)
+        except (TypeError, ValueError):
+            job_id = 0
+        result.append(_build_retry_info(job, account, successful_retries.get(job_id)))
+    return result
 
 
 def retry_job(job_id: int, workers: int | None = None) -> dict:

@@ -2638,6 +2638,72 @@ def get_successful_retry_for_job(job_id: int) -> dict | None:
         return dict(max(matches, key=lambda r: int(r.get("id") or 0)))
 
 
+def get_successful_retry_map_for_jobs(job_ids: set[int] | list[int] | tuple[int, ...]) -> dict[int, dict]:
+    """一次读取任务文件，返回多个任务对应的成功重试任务。"""
+    wanted = set()
+    for value in job_ids or ():
+        try:
+            wanted.add(int(value))
+        except (TypeError, ValueError):
+            continue
+    if not wanted:
+        return {}
+
+    with _LOCK:
+        rows = _load_jobs()
+        sources = {
+            int(row.get("id") or 0): row
+            for row in rows
+            if int(row.get("id") or 0) in wanted
+        }
+        root_ids = {
+            int(source.get("root_job_id") or source.get("id") or 0)
+            for source in sources.values()
+        }
+        latest_by_root: dict[int, dict] = {}
+        for row in rows:
+            if row.get("status") != "success":
+                continue
+            root_id = int(row.get("root_job_id") or 0)
+            if root_id not in root_ids:
+                continue
+            current = latest_by_root.get(root_id)
+            if current is None or int(row.get("id") or 0) > int(current.get("id") or 0):
+                latest_by_root[root_id] = row
+
+        result = {}
+        for job_id, source in sources.items():
+            root_id = int(source.get("root_job_id") or source.get("id") or 0)
+            match = latest_by_root.get(root_id)
+            if match is not None and int(match.get("id") or 0) != job_id:
+                result[job_id] = dict(match)
+        return result
+
+
+def get_retry_account_index() -> tuple[dict[int, dict], dict[str, dict]]:
+    """一次读取账号文件，返回补跑判断所需的轻量账号索引。"""
+    with _LOCK:
+        rows = _load_accounts()
+        by_id: dict[int, dict] = {}
+        by_email: dict[str, dict] = {}
+        for row in rows:
+            item = {
+                "id": row.get("id"),
+                "email": row.get("email"),
+                "codex_status": row.get("codex_status"),
+            }
+            try:
+                account_id = int(row.get("id") or 0)
+            except (TypeError, ValueError):
+                account_id = 0
+            if account_id:
+                by_id[account_id] = item
+            email = str(row.get("email") or "").strip().lower()
+            if email:
+                by_email[email] = item
+        return by_id, by_email
+
+
 def delete_job(job_id: int, *, delete_log: bool = True, allow_running: bool = False) -> bool:
     """
     删除一个注册任务记录；默认同时删除该任务日志文件。返回是否删除到记录。

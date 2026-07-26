@@ -421,6 +421,7 @@
       <div class="toolbar">
         <div><h2>任务列表</h2></div>
         <div class="buttons">
+          <span class="muted" id="jobsLoadState" style="font-size:12px;align-self:center;margin-right:4px;">-</span>
           <span class="muted" id="jobsSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">已选 0</span>
           <button class="btn good" id="btnRetrySelectedJobs" disabled title="重试选中的失败、已停止或已取消任务">重试选中</button>
           <button class="btn" id="btnDeleteSelectedJobs" disabled title="删除选中的非运行中任务，并同时删除对应日志">删除选中</button>
@@ -723,6 +724,7 @@ const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
 let jobsRenderSignature = '';
+let jobsRefreshInFlight = false;
 const JOB_SELECTED = new Set();
 let activeLogJob = null, logTimer = null, jobsTimer = null;
 
@@ -943,6 +945,10 @@ function updateJobsSelectionUi(pageRows = null) {
 }
 
 async function refreshJobs() {
+  if (jobsRefreshInFlight) return;
+  jobsRefreshInFlight = true;
+  const state = $('#jobsLoadState');
+  if (state) state.textContent = '加载中…';
   try {
     const nextJobs = await api('/api/jobs?limit=500');
     const nextSignature = JSON.stringify(nextJobs);
@@ -952,7 +958,12 @@ async function refreshJobs() {
       renderJobs();
     }
     loadSummary();
-  } catch(e) {}
+    if (state) state.textContent = `已更新 ${new Date().toLocaleTimeString()}`;
+  } catch(e) {
+    if (state) state.textContent = `加载失败：${short(e.message || '请求失败', 60)}`;
+  } finally {
+    jobsRefreshInFlight = false;
+  }
 }
 
 let modalScrollY = 0;

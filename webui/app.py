@@ -2257,9 +2257,10 @@ def create_app(auth_code: str | None = None) -> Flask:
         from config import email as _email_cfg
         manual_otp_required = not bool(getattr(_email_cfg, "USE_EMAIL_SERVICE", True))
         rows = db.list_jobs(limit=limit)
-        for row in rows:
+        retry_infos = svc.get_retry_info_batch(rows)
+        for row, retry_info in zip(rows, retry_infos):
             row["manual_otp_required"] = manual_otp_required
-            row.update(svc.get_retry_info(row))
+            row.update(retry_info)
         return jsonify(rows)
 
     @app.post("/api/jobs")
