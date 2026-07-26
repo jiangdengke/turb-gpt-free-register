@@ -454,6 +454,10 @@ EDITABLE_FIELDS = [
         "label": "新账号资格复查延迟(秒)", "help": "新注册 free 账号未发现试用资格或首次查询失败时复查一次；0 表示关闭",
     },
     {
+        "key": "SCAN_AUTO_CHECK_INTERVAL", "file": "proxy.py", "type": "float", "group": "扫码员",
+        "label": "扫码后自动检测间隔(秒)", "help": "扫码员领取任务后，后台按此间隔查询账号套餐；检测到 Plus 后自动完成任务，建议 10-30 秒",
+    },
+    {
         "key": "PLAN_CHECK_WORKERS", "file": "proxy.py", "type": "int", "group": "代理池",
         "label": "套餐查询并发数", "help": "自动、手动和批量查套餐共用；Agent Token 生成使用独立队列；建议 2-4 个线程",
     },

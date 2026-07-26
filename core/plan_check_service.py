@@ -106,6 +106,8 @@ def _run_plan_check(
                 )
 
         db.update_account_plan_check(acc_id=account_id, result=result)
+        # 套餐查询完成后立即同步扫码任务，避免等待下一次页面刷新才显示“已开通”。
+        db.sync_scan_tasks()
         if result.get("ok"):
             logger.info(
                 "[Plan] 后台查询成功: %s, plan=%s, plus_trial=%s, trigger=%s",

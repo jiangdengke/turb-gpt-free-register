@@ -39,6 +39,10 @@ PLAN_CHECK_RETRY_DELAY = 1.5
 # Plus 试用资格时，等待该秒数后再复查一次；设为 0 可关闭复查。
 PLAN_CHECK_REGISTRATION_RECHECK_DELAY = 2.0
 
+# 扫码员领取支付任务后，后台自动查询账号套餐的最小间隔。
+# 账号仍为 free 时会继续轮询，检测到 Plus 后自动完成扫码任务。
+SCAN_AUTO_CHECK_INTERVAL = 15.0
+
 # 自动、手动和批量套餐查询共用同一个后台队列；Codex Agent Token 使用独立队列，
 # 但复用这里的网络模式、请求启动间隔与随机抖动，避免批量后台请求过于集中。
 PLAN_CHECK_WORKERS = 3
@@ -64,6 +68,7 @@ apply_env_overrides(globals(), {
     'PLAN_CHECK_MAX_ATTEMPTS': 'int',
     'PLAN_CHECK_RETRY_DELAY': 'float',
     'PLAN_CHECK_REGISTRATION_RECHECK_DELAY': 'float',
+    'SCAN_AUTO_CHECK_INTERVAL': 'float',
     'PLAN_CHECK_WORKERS': 'int',
     'PLAN_CHECK_QUEUE_LIMIT': 'int',
     'PLAN_CHECK_MIN_INTERVAL': 'float',

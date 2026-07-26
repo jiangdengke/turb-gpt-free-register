@@ -209,7 +209,7 @@
     <div class="stats">
       <div class="stat"><span>待领取</span><strong id="countPending">0</strong></div>
       <div class="stat"><span>我已领取</span><strong id="countClaimed">0</strong></div>
-      <div class="stat"><span>我已扫码</span><strong id="countScanned">0</strong></div>
+      <div class="stat"><span>自动检测中</span><strong id="countScanned">0</strong></div>
       <div class="stat"><span>已开通</span><strong id="countCompleted">0</strong></div>
     </div>
 
@@ -236,7 +236,7 @@
       <div class="section-head"><h2>我的记录</h2></div>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>扫码时间</th><th>完成时间</th></tr></thead>
+          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>检测时间</th><th>完成时间</th></tr></thead>
           <tbody id="historyBody"></tbody>
         </table>
       </div>
@@ -263,7 +263,7 @@
       return Number.isNaN(d.getTime()) ? String(v) : d.toLocaleString();
     }
     function statusLabel(status) {
-      return {pending:'待领取', claimed:'已领取', scanned:'已扫码', completed:'已开通'}[status] || status || '-';
+      return {pending:'待领取', claimed:'已领取', scanned:'检测中', completed:'已开通'}[status] || status || '-';
     }
     function showToast(text) {
       const toast = $('#toast');
@@ -292,7 +292,7 @@
       const counts = data.counts || {};
       $('#countPending').textContent = counts.pending || 0;
       $('#countClaimed').textContent = counts.claimed || 0;
-      $('#countScanned').textContent = counts.scanned || 0;
+      $('#countScanned').textContent = (counts.claimed || 0) + (counts.scanned || 0);
       $('#countCompleted').textContent = counts.completed || 0;
 
       const claimed = (data.mine || []).filter((task) => task.status === 'claimed');
@@ -302,14 +302,13 @@
             ? `<img class="qr" src="${esc(task.qr_url)}" alt="任务 ${esc(task.id)} 支付二维码" referrerpolicy="no-referrer">`
             : `<div class="qr-empty">当前任务没有二维码图片<br>请打开支付链接</div>`}
           <div class="task-meta">
-            <div><span class="pill status-claimed">任务 #${esc(task.id)}</span></div>
+            <div><span class="pill status-claimed">自动检测中 · 任务 #${esc(task.id)}</span></div>
             <div class="email">${esc(task.email)}</div>
             <div class="meta-row">方式：${esc(task.payment_method || task.link_type || '-')}</div>
             <div class="meta-row">领取租约：<span class="countdown" data-countdown="${esc(task.lease_expires_at)}">${remaining(task.lease_expires_at)}</span></div>
             <div class="meta-row">链接到期：${esc(fmtDate(task.link_expires_at))}</div>
             <div class="actions">
               ${task.payment_url ? `<a class="link-button" href="${esc(task.payment_url)}" target="_blank" rel="noopener noreferrer">打开支付链接</a>` : ''}
-              <button class="good" onclick="taskAction(${Number(task.id)}, 'scanned', this)">已扫码</button>
               <button class="danger" onclick="taskAction(${Number(task.id)}, 'release', this)">释放</button>
             </div>
           </div>
@@ -372,7 +371,7 @@
           headers: {'Content-Type':'application/json'},
           body: JSON.stringify({action}),
         });
-        showToast(action === 'scanned' ? '已记录扫码' : '任务已释放');
+        showToast('任务已释放');
         await loadQueue();
       } catch (error) {
         showToast(error.message);

@@ -668,7 +668,7 @@
       <div class="table-wrap">
         <table>
           <colgroup><col style="width:70px"><col style="width:220px"><col style="width:90px"><col style="width:110px"><col style="width:110px"><col style="width:110px"><col style="width:180px"><col style="width:180px"><col style="width:260px"></colgroup>
-          <thead><tr><th>ID</th><th>名称</th><th>状态</th><th>已领取</th><th>已扫码</th><th>已开通</th><th>最近登录</th><th>创建时间</th><th>操作</th></tr></thead>
+          <thead><tr><th>ID</th><th>名称</th><th>状态</th><th>已领取</th><th>检测中</th><th>已开通</th><th>最近登录</th><th>创建时间</th><th>操作</th></tr></thead>
           <tbody id="scannersBody"></tbody>
         </table>
       </div>
@@ -682,7 +682,7 @@
       <div class="table-wrap">
         <table>
           <colgroup><col style="width:70px"><col style="width:260px"><col style="width:110px"><col style="width:180px"><col style="width:170px"><col style="width:170px"><col style="width:170px"><col style="width:120px"></colgroup>
-          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>扫码员</th><th>领取时间</th><th>扫码时间</th><th>链接到期</th><th>操作</th></tr></thead>
+          <thead><tr><th>任务</th><th>账号</th><th>状态</th><th>扫码员</th><th>领取时间</th><th>检测时间</th><th>链接到期</th><th>操作</th></tr></thead>
           <tbody id="scanTasksBody"></tbody>
         </table>
       </div>
@@ -3017,7 +3017,7 @@ function scanStatusLabel(status) {
   return {
     pending: '待领取',
     claimed: '已领取',
-    scanned: '已扫码',
+    scanned: '检测中',
     completed: '已开通',
     expired: '已过期',
     superseded: '已替换',

@@ -646,7 +646,7 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
     for task in tasks:
         account = account_by_id.get(int(task.get("account_id") or 0))
         status = str(task.get("status") or "")
-        if account is None and status in {"pending", "claimed"}:
+        if account is None and status in {"pending", "claimed", "scanned"}:
             task["status"] = "superseded"
             task["scanner_id"] = None
             task["lease_expires_at"] = None
@@ -657,10 +657,14 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
         if account is None:
             continue
         if _account_is_plus(account) and status not in {"completed", "superseded"}:
+            now = _now()
+            if not task.get("scanned_at"):
+                task["scanned_at"] = now
+                _task_event(task, "auto_scanned", detail="套餐查询确认账号已升级为 Plus")
             task["status"] = "completed"
-            task["completed_at"] = _now()
+            task["completed_at"] = now
             task["lease_expires_at"] = None
-            task["updated_at"] = _now()
+            task["updated_at"] = now
             _task_event(task, "completed", detail="账号套餐已变更为 Plus")
             changed = True
             continue
@@ -676,7 +680,7 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
                 _task_event(task, "lease_expired", scanner_id=scanner_id)
                 changed = True
                 status = "pending"
-        if status in {"pending", "claimed"}:
+        if status in {"pending", "claimed", "scanned"}:
             expires_ts = float(task.get("link_expires_ts") or 0)
             if expires_ts and expires_ts <= now_ts:
                 scanner_id = task.get("scanner_id")
@@ -705,7 +709,7 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
         for task in tasks:
             if (
                 int(task.get("account_id") or 0) == account_id
-                and task.get("status") in {"pending", "claimed"}
+                and task.get("status") in {"pending", "claimed", "scanned"}
             ):
                 scanner_id = task.get("scanner_id")
                 task["status"] = "superseded"
@@ -735,6 +739,17 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
         tasks.append(task)
         changed = True
     return changed
+
+
+def sync_scan_tasks() -> bool:
+    """用当前账号套餐状态同步扫码任务，供后台检测服务调用。"""
+    with _LOCK:
+        accounts = _load_accounts()
+        tasks = _load_scan_tasks()
+        changed = _sync_scan_tasks_locked(accounts, tasks)
+        if changed:
+            _save_scan_tasks(tasks)
+        return changed
 
 
 def _decorate_scan_task(
@@ -1657,8 +1672,8 @@ def claim_scan_task(task_id: int, scanner_id: int, lease_seconds: int = _SCAN_LE
 
 def update_scan_task_by_scanner(task_id: int, scanner_id: int, action: str) -> dict:
     action = str(action or "").strip().lower()
-    if action not in {"scanned", "release"}:
-        raise ValueError("action 仅支持 scanned 或 release")
+    if action != "release":
+        raise ValueError("扫码结果由系统自动检测，扫码员仅可释放任务")
     with _LOCK:
         scanners = _load_scanners()
         scanner = next((
@@ -1683,17 +1698,11 @@ def update_scan_task_by_scanner(task_id: int, scanner_id: int, action: str) -> d
                 _save_scan_tasks(tasks)
             raise PermissionError("该任务不属于当前扫码员或领取已失效")
         now = _now()
-        if action == "scanned":
-            task["status"] = "scanned"
-            task["scanned_at"] = now
-            task["lease_expires_at"] = None
-            _task_event(task, "scanned", scanner_id=scanner_id)
-        else:
-            task["status"] = "pending"
-            task["scanner_id"] = None
-            task["claimed_at"] = None
-            task["lease_expires_at"] = None
-            _task_event(task, "released", scanner_id=scanner_id)
+        task["status"] = "pending"
+        task["scanner_id"] = None
+        task["claimed_at"] = None
+        task["lease_expires_at"] = None
+        _task_event(task, "released", scanner_id=scanner_id)
         task["updated_at"] = now
         _save_scan_tasks(tasks)
         account_by_id = {int(row.get("id") or 0): row for row in accounts}

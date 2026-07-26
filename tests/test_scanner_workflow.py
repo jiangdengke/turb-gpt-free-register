@@ -6,7 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from core import db
+from core import db, scan_monitor_service
 from webui.app import create_app
 
 
@@ -72,15 +72,36 @@ class ScannerPersistenceTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "已被领取"):
             db.claim_scan_task(task_id, scanner_b["id"])
 
-        scanned = db.update_scan_task_by_scanner(task_id, scanner_a["id"], "scanned")
-        self.assertEqual(scanned["status"], "scanned")
+        with self.assertRaisesRegex(ValueError, "系统自动检测"):
+            db.update_scan_task_by_scanner(task_id, scanner_a["id"], "scanned")
         account = _account(plan="plus")
         db._write_json(db._ACCOUNTS_JSON, [account])
 
         refreshed = db.get_scanner_queue(scanner_a["id"])
         completed = next(item for item in refreshed["mine"] if item["id"] == task_id)
         self.assertEqual(completed["status"], "completed")
+        self.assertIsNotNone(completed["scanned_at"])
         self.assertNotIn("qr_url", completed)
+
+    def test_claimed_task_is_queued_for_automatic_plan_check(self):
+        scanner, _ = db.create_scanner("扫码员 A")
+        task_id = db.get_scanner_queue(scanner["id"])["pending"][0]["id"]
+        db.claim_scan_task(task_id, scanner["id"])
+        account = _account()
+        account["access_token"] = "fixture-access-token"
+
+        with (
+            patch.object(db, "get_account", return_value=account),
+            patch.object(
+                scan_monitor_service.plan_check_service,
+                "enqueue_account_plan_check",
+                return_value={"accepted": True},
+            ) as enqueue,
+        ):
+            stats = scan_monitor_service.run_once()
+
+        self.assertEqual(stats["queued"], 1)
+        self.assertEqual(enqueue.call_args.kwargs["trigger"], "scan_auto")
 
     def test_expired_lease_returns_task_to_pending_queue(self):
         scanner_a, _ = db.create_scanner("扫码员 A")

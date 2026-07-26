@@ -18,7 +18,14 @@ from urllib.parse import urlparse
 
 from flask import Flask, Response, jsonify, redirect, render_template, request
 
-from core import codex_retry_service, db, plan_check_service, extract_link_service, codex_agent_service
+from core import (
+    codex_retry_service,
+    db,
+    plan_check_service,
+    extract_link_service,
+    codex_agent_service,
+    scan_monitor_service,
+)
 from webui.auth import (
     current_auth_role,
     current_scanner_identity,
@@ -2708,4 +2715,5 @@ def create_app(auth_code: str | None = None) -> Flask:
             ),
         })
 
+    scan_monitor_service.start()
     return app
