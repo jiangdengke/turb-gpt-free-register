@@ -337,16 +337,30 @@ def _run_extract(*, account_id: int, email: str, access_token: str, link_type: s
         _QUEUE_SLOTS.release()
 
 
-def enqueue_account_extract(*, account_id: int, email: str, access_token: str, trigger: str = "manual", link_type: str | None = None, cdk: str | None = None) -> dict:
+def enqueue_account_extract(
+    *,
+    account_id: int,
+    email: str,
+    access_token: str,
+    trigger: str = "manual",
+    link_type: str | None = None,
+    cdk: str | None = None,
+    scanner_id: int | None = None,
+) -> dict:
     if not _QUEUE_SLOTS.acquire(blocking=False):
         return {"accepted": False, "busy": False, "error": "提链队列已满"}
     try:
         validate_settings(link_type=link_type, cdk=cdk)
         lt = _link_type(link_type)
         code = _cdk(cdk)
-        if not db.claim_account_extract(account_id, trigger=trigger, link_type=lt):
+        if not db.claim_account_extract(
+            account_id,
+            trigger=trigger,
+            link_type=lt,
+            scanner_id=scanner_id,
+        ):
             _QUEUE_SLOTS.release()
-            return {"accepted": False, "busy": True, "error": "该账号正在提链中"}
+            return {"accepted": False, "busy": True, "error": "该账号正在提链中或已有有效扫码任务"}
         fut = _EXECUTOR.submit(_run_extract, account_id=account_id, email=email, access_token=access_token, link_type=lt, cdk=code, trigger=trigger)
         return {"accepted": True, "busy": False, "future": fut, "link_type": lt}
     except Exception:

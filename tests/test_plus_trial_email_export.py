@@ -155,7 +155,7 @@ class PlusTrialEmailExportTests(unittest.TestCase):
         )
         self.assertIn("text/plain", downloaded.content_type)
 
-    def test_accounts_page_has_export_button_and_route(self):
+    def test_accounts_page_has_plus_codex_retry_selector_without_email_export_buttons(self):
         response = self._client().get("/", headers={"X-Auth-Code": "test-code"})
         html = response.get_data(as_text=True)
 
@@ -166,19 +166,24 @@ class PlusTrialEmailExportTests(unittest.TestCase):
         self.assertIn("activeAccountPlanFilter()", html)
         self.assertIn("updateAccountFilterCounts()", html)
         self.assertIn("SHOW_PLUS_TRIAL_ACCOUNTS_ONLY", html)
-        self.assertIn('id="btnExportPlusEmails"', html)
-        self.assertIn('id="btnExportPlusTrialEmails"', html)
-        self.assertIn("/api/accounts/export-plus-emails", html)
-        self.assertIn("/api/accounts/export-plus-trial-emails", html)
-        self.assertIn("{account_ids: ids}", html)
-        self.assertIn("邮箱---取码URL", html)
-        self.assertIn("导出Plus邮箱", html)
-        self.assertIn("导出可试用邮箱", html)
+        self.assertIn('id="btnSelectPlusCodexRetry"', html)
+        self.assertIn('id="plusCodexRetryCount"', html)
+        self.assertIn("isPlusCodexRetryCandidate", html)
+        self.assertIn("['skipped', 'failed']", html)
+        self.assertNotIn('id="btnExportPlusEmails"', html)
+        self.assertNotIn('id="btnExportPlusTrialEmails"', html)
 
     def test_filter_counts_reports_plus_and_plus_trial_accounts(self):
         with patch(
             "webui.app.db.list_accounts",
-            side_effect=[[{"id": 1}], [{"id": 2}, {"id": 3}]],
+            side_effect=[
+                [
+                    {"id": 1, "codex_status": "failed"},
+                    {"id": 4, "codex_status": "skipped"},
+                    {"id": 5, "codex_status": "success"},
+                ],
+                [{"id": 2}, {"id": 3}],
+            ],
         ) as list_accounts:
             response = self._client().get(
                 "/api/accounts/filter-counts?archived=only",
@@ -186,7 +191,7 @@ class PlusTrialEmailExportTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json(), {"plus": 1, "plus_trial": 2})
+        self.assertEqual(response.get_json(), {"plus": 3, "plus_trial": 2, "plus_codex_retry": 2})
         self.assertEqual(list_accounts.call_count, 2)
         list_accounts.assert_any_call(limit=100000, archived="only", plan_filter="plus")
         list_accounts.assert_any_call(limit=100000, archived="only", plan_filter="plus_trial")

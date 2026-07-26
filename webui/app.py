@@ -209,6 +209,43 @@ def create_app(auth_code: str | None = None) -> Flask:
         except RuntimeError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 409
 
+    @app.post("/api/scan/accounts/<int:account_id>/extract")
+    def api_scanner_extract_account(account_id: int):
+        """扫码员使用服务端配置提链；成功后的任务自动归属当前扫码员。"""
+        scanner, error = _scanner_or_403()
+        if error:
+            return error
+        try:
+            extract_link_service.validate_settings()
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+        account = db.get_account(account_id)
+        if not account:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        plan = str(account.get("current_plan_type") or account.get("plan_type") or "").strip().lower()
+        if plan != "free" or not bool(account.get("plus_trial_eligible")):
+            return jsonify({"ok": False, "error": "该账号不在可提链范围"}), 400
+        token = str(account.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "该账号缺少 access_token"}), 400
+        try:
+            queued = extract_link_service.enqueue_account_extract(
+                account_id=account_id,
+                email=account.get("email") or "",
+                access_token=token,
+                trigger=f"scanner:{int(scanner['id'])}",
+                scanner_id=int(scanner["id"]),
+            )
+        except Exception as exc:
+            return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+        payload = {key: value for key, value in queued.items() if key != "future"}
+        if queued.get("busy"):
+            return jsonify({"ok": False, **payload}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **payload}), 503
+        return jsonify({"ok": True, "started": True, **payload}), 202
+
     @app.post("/api/scan/tasks/<int:task_id>/action")
     def api_update_scan_task(task_id: int):
         scanner, error = _scanner_or_403()
@@ -275,9 +312,15 @@ def create_app(auth_code: str | None = None) -> Flask:
     def api_account_filter_counts():
         """返回当前归档视图中的 Plus 与 Plus 试用资格账号数量。"""
         archived = str(request.args.get("archived", default="0") or "0").lower()
+        plus_accounts = db.list_accounts(limit=100000, archived=archived, plan_filter="plus")
+        plus_trial_accounts = db.list_accounts(limit=100000, archived=archived, plan_filter="plus_trial")
         return jsonify({
-            "plus": len(db.list_accounts(limit=100000, archived=archived, plan_filter="plus")),
-            "plus_trial": len(db.list_accounts(limit=100000, archived=archived, plan_filter="plus_trial")),
+            "plus": len(plus_accounts),
+            "plus_trial": len(plus_trial_accounts),
+            "plus_codex_retry": sum(
+                str(account.get("codex_status") or "").strip().lower() in {"skipped", "failed"}
+                for account in plus_accounts
+            ),
         })
 
     def _export_account_emails(

@@ -476,8 +476,7 @@
             <label class="inline-num" title="只查询/显示 free(可Plus试用) 的账号">
               <input id="showPlusTrialAccountsOnly" type="checkbox" style="width:auto;min-height:auto;"> free(可Plus试用)（<span id="plusTrialAccountsCount">0</span>）
             </label>
-            <button class="btn primary" id="btnExportPlusEmails" disabled title="勾选已开通 Plus 账号后，按 邮箱---取码URL 导出">导出Plus邮箱</button>
-            <button class="btn good" id="btnExportPlusTrialEmails" title="导出当前未归档或归档视图中的 free(可Plus试用) 通用 API 邮箱，格式为 邮箱----取码地址">导出可试用邮箱</button>
+            <button class="btn primary" id="btnSelectPlusCodexRetry" title="切换到 Plus 视图，并选中 Codex 状态为已跳过或失败的全部账号">选中Plus待补跑（<span id="plusCodexRetryCount">0</span>）</button>
           </div>
         </div>
         <div class="accounts-actionbar">
@@ -742,7 +741,7 @@ let ACCOUNTS = [], OUTLOOK = [], CONFIG = [], SCANNERS = [], SCAN_TASKS = [];
 let SHOW_ARCHIVED_ACCOUNTS = false;
 let SHOW_PLUS_ACCOUNTS_ONLY = false;
 let SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
-let ACCOUNT_FILTER_COUNTS = {plus: 0, plus_trial: 0};
+let ACCOUNT_FILTER_COUNTS = {plus: 0, plus_trial: 0, plus_codex_retry: 0};
 const ACCOUNT_SELECTED = new Set();
 const OUTLOOK_SELECTED = new Set();
 let JOBS = [];
@@ -1254,12 +1253,17 @@ function activeAccountPlanFilter() {
   if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
   return '';
 }
+function isPlusCodexRetryCandidate(account) {
+  const plan = String(account?.current_plan_type || account?.plan_type || '').trim().toLowerCase();
+  const codexStatus = String(account?.codex_status || '').trim().toLowerCase();
+  return plan.includes('plus') && !plan.includes('free') && ['skipped', 'failed'].includes(codexStatus);
+}
 async function loadAccountFilterCounts() {
   const archived = SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0';
   try {
     ACCOUNT_FILTER_COUNTS = await api(`/api/accounts/filter-counts?archived=${encodeURIComponent(archived)}`);
   } catch(e) {
-    ACCOUNT_FILTER_COUNTS = {plus: 0, plus_trial: 0};
+    ACCOUNT_FILTER_COUNTS = {plus: 0, plus_trial: 0, plus_codex_retry: 0};
   }
   updateAccountFilterCounts();
 }
@@ -1529,8 +1533,11 @@ function updateAccountFilterCounts() {
   const view = SHOW_ARCHIVED_ACCOUNTS ? '归档' : '未归档';
   const plus = Number(ACCOUNT_FILTER_COUNTS.plus || 0);
   const trial = Number(ACCOUNT_FILTER_COUNTS.plus_trial || 0);
+  const codexRetry = Number(ACCOUNT_FILTER_COUNTS.plus_codex_retry || 0);
   const plusEl = $('#plusAccountsCount');
   const trialEl = $('#plusTrialAccountsCount');
+  const codexRetryEl = $('#plusCodexRetryCount');
+  const codexRetryBtn = $('#btnSelectPlusCodexRetry');
   if (plusEl) {
     plusEl.textContent = String(plus);
     plusEl.title = `当前${view}视图共 ${plus} 个已开通 Plus 账号`;
@@ -1538,6 +1545,11 @@ function updateAccountFilterCounts() {
   if (trialEl) {
     trialEl.textContent = String(trial);
     trialEl.title = `当前${view}视图共 ${trial} 个 free(可Plus试用) 账号`;
+  }
+  if (codexRetryEl) codexRetryEl.textContent = String(codexRetry);
+  if (codexRetryBtn) {
+    codexRetryBtn.disabled = codexRetry === 0;
+    codexRetryBtn.title = `切换到 Plus 视图，并选中当前${view}视图中 ${codexRetry} 个 Codex 已跳过或失败账号`;
   }
 }
 function renderAccounts() {
@@ -1593,7 +1605,6 @@ function updateAccountSelectionUi(pageRows = null) {
   const downloadTxtBtn = $('#btnDownloadSelectedTxt');
   const noteSelectedBtn = $('#btnNoteSelectedAccounts');
   const archiveSelectedBtn = $('#btnArchiveSelectedAccounts');
-  const exportPlusEmailsBtn = $('#btnExportPlusEmails');
   if (hint) hint.textContent = `已选 ${ACCOUNT_SELECTED.size}`;
   if (bulkBtn) bulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (retryBulkBtn) retryBulkBtn.disabled = ACCOUNT_SELECTED.size === 0;
@@ -1608,14 +1619,6 @@ function updateAccountSelectionUi(pageRows = null) {
   if (copySelectedBtn) copySelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (downloadTxtBtn) downloadTxtBtn.disabled = ACCOUNT_SELECTED.size === 0;
   if (noteSelectedBtn) noteSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
-  if (exportPlusEmailsBtn) {
-    const selectedCount = ACCOUNT_SELECTED.size;
-    exportPlusEmailsBtn.disabled = !SHOW_PLUS_ACCOUNTS_ONLY || selectedCount === 0;
-    exportPlusEmailsBtn.textContent = selectedCount ? `导出Plus邮箱 (${selectedCount})` : '导出Plus邮箱';
-    exportPlusEmailsBtn.title = SHOW_PLUS_ACCOUNTS_ONLY
-      ? `导出已选中的 ${selectedCount} 个 Plus 账号；格式为 邮箱---取码URL`
-      : '请先勾选“已开通Plus”，再逐行选择需要导出的账号';
-  }
   if (archiveSelectedBtn) {
     archiveSelectedBtn.disabled = ACCOUNT_SELECTED.size === 0;
     archiveSelectedBtn.textContent = SHOW_ARCHIVED_ACCOUNTS ? '恢复选中' : '归档选中';
@@ -1847,8 +1850,19 @@ $('#showPlusTrialAccountsOnly').addEventListener('change', async (e) => {
   await loadAccounts();
   await pollAccountPlanStatuses();
 });
-$('#btnExportPlusEmails').addEventListener('click', exportPlusEmails);
-$('#btnExportPlusTrialEmails').addEventListener('click', exportPlusTrialEmails);
+$('#btnSelectPlusCodexRetry').addEventListener('click', async () => {
+  SHOW_PLUS_ACCOUNTS_ONLY = true;
+  SHOW_PLUS_TRIAL_ACCOUNTS_ONLY = false;
+  $('#showPlusAccountsOnly').checked = true;
+  $('#showPlusTrialAccountsOnly').checked = false;
+  ACCOUNT_SELECTED.clear();
+  PAGERS.accounts.page = 1;
+  await loadAccounts();
+  const candidates = ACCOUNTS.filter(isPlusCodexRetryCandidate);
+  candidates.forEach(account => ACCOUNT_SELECTED.add(Number(account.id)));
+  renderAccounts();
+  showToast(candidates.length ? `已选中 ${candidates.length} 个 Plus 待补跑账号` : '当前视图没有 Plus 待补跑账号');
+});
 
 
 function copySelectedAccountLines() {
@@ -1861,64 +1875,6 @@ function copySelectedAccountLines() {
   if (!lines.length) { showToast('请先选择账号'); return; }
   copyText(lines.join('\n'));
   showToast(`已复制 ${lines.length} 行`);
-}
-
-async function exportAccountEmails(buttonId, endpoint, exportLabel, extraPayload = {}) {
-  const btn = $(buttonId);
-  const old = btn.textContent;
-  btn.disabled = true;
-  btn.textContent = '导出中…';
-  try {
-    const result = await api(endpoint, {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({
-        archived: SHOW_ARCHIVED_ACCOUNTS ? 'only' : '0',
-        prepare: true,
-        ...extraPayload,
-      }),
-    });
-    if (!result.download_url) throw new Error('服务端未返回下载地址');
-    const a = document.createElement('a');
-    a.href = result.download_url;
-    a.download = result.filename || '';
-    a.rel = 'noopener';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => a.remove(), 1000);
-    const skipped = result.skipped_count ? `，跳过 ${result.skipped_count} 个缺少取码地址的账号` : '';
-    showToast(`已导出 ${result.exported_count || 0} 个${exportLabel}${skipped}`);
-  } catch(err) {
-    showToast(`导出${exportLabel}失败: ` + err.message);
-  } finally {
-    setTimeout(() => {
-      btn.textContent = old;
-      if (buttonId === '#btnExportPlusEmails') updateAccountSelectionUi();
-      else btn.disabled = false;
-    }, 1000);
-  }
-}
-
-function exportPlusEmails() {
-  if (!SHOW_PLUS_ACCOUNTS_ONLY) {
-    showToast('请先勾选“已开通Plus”');
-    return;
-  }
-  const ids = Array.from(ACCOUNT_SELECTED);
-  if (!ids.length) {
-    showToast('请先选择要导出的 Plus 账号');
-    return;
-  }
-  return exportAccountEmails(
-    '#btnExportPlusEmails',
-    '/api/accounts/export-plus-emails',
-    'Plus邮箱',
-    {account_ids: ids},
-  );
-}
-
-function exportPlusTrialEmails() {
-  return exportAccountEmails('#btnExportPlusTrialEmails', '/api/accounts/export-plus-trial-emails', '可试用邮箱');
 }
 
 function _selectedAccountLines() {

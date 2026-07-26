@@ -177,6 +177,8 @@
     .status-pending { color: #1d4ed8; background: var(--soft-blue); }
     .status-claimed { color: var(--amber); background: #fff5dd; }
     .status-scanned, .status-completed { color: var(--green); background: var(--soft-green); }
+    .status-failed { color: var(--red); background: var(--soft-red); }
+    .candidate-message { max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
     .empty { padding: 30px 16px; color: var(--muted); text-align: center; font-size: 13px; }
     #toast {
       position: fixed;
@@ -233,6 +235,20 @@
 
     <section>
       <div class="section-head">
+        <h2 data-i18n="extractAccounts">可提链账号</h2>
+        <span class="muted" id="extractCandidateState">0</span>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th data-i18n="account">账号</th><th data-i18n="extractStatus">提链状态</th><th data-i18n="method">方式</th><th data-i18n="actions">操作</th></tr></thead>
+          <tbody id="extractCandidateBody"></tbody>
+        </table>
+      </div>
+      <div class="empty" id="extractCandidateEmpty" data-i18n="noExtractCandidates">暂无可提链账号</div>
+    </section>
+
+    <section>
+      <div class="section-head">
         <h2 data-i18n="myTasks">我已领取</h2>
         <span class="muted" id="refreshState" data-i18n="loading">加载中</span>
       </div>
@@ -280,6 +296,10 @@
         linkExpiry: '链接到期', openPayment: '打开支付链接', release: '释放',
         claim: '领取', claimedTask: '已领取任务 #{id}', released: '任务已释放',
         qrAlt: '任务 {id} 支付二维码', expired: '已过期', superseded: '已替换',
+        extractAccounts: '可提链账号', extractStatus: '提链状态', noExtractCandidates: '暂无可提链账号',
+        candidateCount: '共 {count} 个', extractReady: '可提链', extracting: '提链中', extractFailed: '提链失败',
+        linkExpired: '链接已过期', extractAndClaim: '提链并领取', retryExtract: '重试提链',
+        confirmExtract: '确定提链并领取该账号吗？成功提链会消耗 1 次 CDK。', extractQueued: '提链任务已提交',
       },
       hi: {
         title: 'स्कैन कार्यक्षेत्र', logout: 'लॉग आउट', pending: 'लंबित',
@@ -295,6 +315,10 @@
         openPayment: 'भुगतान लिंक खोलें', release: 'रिलीज़', claim: 'लें',
         claimedTask: 'कार्य #{id} लिया गया', released: 'कार्य रिलीज़ किया गया',
         qrAlt: 'कार्य {id} का भुगतान QR कोड', expired: 'समाप्त', superseded: 'बदला गया',
+        extractAccounts: 'लिंक बनाने योग्य खाते', extractStatus: 'लिंक स्थिति', noExtractCandidates: 'कोई खाता उपलब्ध नहीं',
+        candidateCount: 'कुल {count}', extractReady: 'तैयार', extracting: 'लिंक बन रहा है', extractFailed: 'लिंक विफल',
+        linkExpired: 'लिंक समाप्त', extractAndClaim: 'लिंक बनाएँ और लें', retryExtract: 'फिर से प्रयास करें',
+        confirmExtract: 'इस खाते का लिंक बनाकर कार्य लेना है? सफल लिंक पर 1 CDK उपयोग होगा।', extractQueued: 'लिंक कार्य जमा हुआ',
       },
       en: {
         title: 'Scan Workbench', logout: 'Log out', pending: 'Pending',
@@ -310,6 +334,10 @@
         openPayment: 'Open payment link', release: 'Release', claim: 'Claim',
         claimedTask: 'Task #{id} claimed', released: 'Task released',
         qrAlt: 'Payment QR code for task {id}', expired: 'Expired', superseded: 'Replaced',
+        extractAccounts: 'Accounts ready for links', extractStatus: 'Link status', noExtractCandidates: 'No accounts ready for links',
+        candidateCount: '{count} accounts', extractReady: 'Ready', extracting: 'Creating link', extractFailed: 'Link failed',
+        linkExpired: 'Link expired', extractAndClaim: 'Create and claim', retryExtract: 'Retry link',
+        confirmExtract: 'Create the payment link and claim this account? A successful link uses 1 CDK.', extractQueued: 'Link task submitted',
       },
     };
     const savedLocale = localStorage.getItem(LOCALE_KEY);
@@ -389,6 +417,26 @@
       $('#countScanned').textContent = (counts.claimed || 0) + (counts.scanned || 0);
       $('#countCompleted').textContent = counts.completed || 0;
 
+      const candidates = data.extract_candidates || [];
+      $('#extractCandidateState').textContent = t('candidateCount', {count: candidates.length});
+      $('#extractCandidateBody').innerHTML = candidates.map((candidate) => {
+        const status = candidate.extract_link_status || 'ready';
+        const inProgress = ['queued', 'running'].includes(status);
+        const failed = status === 'failed';
+        const expired = status === 'success';
+        const statusText = inProgress ? t('extracting') : failed ? t('extractFailed') : expired ? t('linkExpired') : t('extractReady');
+        const statusClass = failed ? 'status-failed' : inProgress ? 'status-claimed' : 'status-pending';
+        const buttonText = failed || expired ? t('retryExtract') : t('extractAndClaim');
+        const message = candidate.extract_link_message || '';
+        return `<tr>
+          <td><strong>${esc(candidate.email)}</strong>${message ? `<div class="muted candidate-message" title="${esc(message)}">${esc(message)}</div>` : ''}</td>
+          <td><span class="pill ${statusClass}">${esc(statusText)}</span></td>
+          <td>${esc((candidate.extract_link_type || 'UPI').toUpperCase())}</td>
+          <td><button class="good" ${candidate.can_extract ? '' : 'disabled'} onclick="extractAccount(${Number(candidate.account_id)}, this)">${esc(inProgress ? t('extracting') : buttonText)}</button></td>
+        </tr>`;
+      }).join('');
+      $('#extractCandidateEmpty').style.display = candidates.length ? 'none' : 'block';
+
       const claimed = (data.mine || []).filter((task) => task.status === 'claimed');
       $('#currentTasks').innerHTML = claimed.length ? `<div class="current-grid">${claimed.map((task) => `
         <article class="task-card">
@@ -450,6 +498,20 @@
         await api(`/api/scan/tasks/${id}/claim`, {method:'POST'});
         showToast(t('claimedTask', {id}));
         await loadQueue();
+      } catch (error) {
+        showToast(error.message);
+        await loadQueue(true);
+      } finally {
+        button.disabled = false;
+      }
+    }
+    async function extractAccount(accountId, button) {
+      if (!confirm(t('confirmExtract'))) return;
+      button.disabled = true;
+      try {
+        await api(`/api/scan/accounts/${accountId}/extract`, {method:'POST'});
+        showToast(t('extractQueued'));
+        await loadQueue(true);
       } catch (error) {
         showToast(error.message);
         await loadQueue(true);

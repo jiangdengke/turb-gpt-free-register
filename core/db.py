@@ -614,6 +614,14 @@ def _account_has_scannable_link(row: dict) -> bool:
     )
 
 
+def _masked_scan_email(value: str) -> str:
+    email = str(value or "")
+    local, sep, domain = email.partition("@")
+    if sep and len(local) > 2:
+        return f"{local[:2]}{'*' * min(6, max(2, len(local) - 2))}@{domain}"
+    return email
+
+
 def _scan_link_fingerprint(row: dict) -> str:
     raw = json.dumps({
         "job_id": row.get("extract_link_job_id"),
@@ -719,14 +727,20 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
                 _task_event(task, "superseded", scanner_id=scanner_id, detail="账号生成了新的支付链接")
                 changed = True
         now = _now()
+        scanner_id = int(account.get("extract_link_scanner_id") or 0) or None
+        lease_expires_at = None
+        if scanner_id is not None:
+            lease_expires_at = now_ts + _SCAN_LEASE_SECONDS
+            if expires_ts is not None:
+                lease_expires_at = min(lease_expires_at, expires_ts)
         task = {
             "id": _next_id(tasks),
             "account_id": account_id,
             "link_fingerprint": fingerprint,
-            "status": "pending",
-            "scanner_id": None,
-            "claimed_at": None,
-            "lease_expires_at": None,
+            "status": "claimed" if scanner_id is not None else "pending",
+            "scanner_id": scanner_id,
+            "claimed_at": now if scanner_id is not None else None,
+            "lease_expires_at": lease_expires_at,
             "scanned_at": None,
             "completed_at": None,
             "link_expires_at": account.get("extract_link_expires_at"),
@@ -736,6 +750,8 @@ def _sync_scan_tasks_locked(accounts: list[dict], tasks: list[dict]) -> bool:
             "events": [],
         }
         _task_event(task, "created")
+        if scanner_id is not None:
+            _task_event(task, "claimed", scanner_id=scanner_id, detail="扫码员提链成功后自动领取")
         tasks.append(task)
         changed = True
     return changed
@@ -760,10 +776,7 @@ def _decorate_scan_task(
     reveal_link: bool = False,
 ) -> dict:
     email = str((account or {}).get("email") or "")
-    local, sep, domain = email.partition("@")
-    masked_email = email
-    if sep and len(local) > 2:
-        masked_email = f"{local[:2]}{'*' * min(6, max(2, len(local) - 2))}@{domain}"
+    masked_email = _masked_scan_email(email)
     scanner = scanner_by_id.get(int(task.get("scanner_id") or 0))
     out = {
         "id": int(task.get("id") or 0),
@@ -1247,13 +1260,29 @@ def update_account_plan_check(acc_id: int | None = None, email: str | None = Non
         return True
 
 
-def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str = "pix") -> bool:
+def claim_account_extract(
+    acc_id: int,
+    trigger: str = "manual",
+    link_type: str = "pix",
+    scanner_id: int | None = None,
+) -> bool:
     """原子占用账号提链任务；已有未超时任务时返回 False。"""
     with _LOCK:
         accounts = _load_accounts()
         row = next((r for r in accounts if int(r.get("id") or 0) == int(acc_id)), None)
         if row is None:
             return False
+        if scanner_id is not None:
+            scanners = _load_scanners()
+            scanner = next((
+                item for item in scanners
+                if int(item.get("id") or 0) == int(scanner_id) and bool(item.get("enabled"))
+            ), None)
+            if scanner is None:
+                return False
+            expires_ts = _extract_link_expiry_timestamp(row.get("extract_link_expires_at"))
+            if _account_has_scannable_link(row) and (expires_ts is None or expires_ts > time.time()):
+                return False
         current_status = row.get("extract_link_status")
         if current_status in {"queued", "running"}:
             try:
@@ -1269,6 +1298,7 @@ def claim_account_extract(acc_id: int, trigger: str = "manual", link_type: str =
         row["extract_link_ok"] = False
         row["extract_link_trigger"] = str(trigger or "manual")
         row["extract_link_type"] = str(link_type or "pix").lower()
+        row["extract_link_scanner_id"] = int(scanner_id) if scanner_id is not None else None
         row["extract_link_queued_at"] = now
         row["extract_link_started_at"] = None
         row["extract_link_completed_at"] = None
@@ -1333,6 +1363,9 @@ def update_account_extract(acc_id: int, result: dict | None = None) -> bool:
             row["extract_link_result_json"] = json.dumps(payload, ensure_ascii=False)
         row["updated_at"] = _now()
         _save_accounts(accounts)
+        tasks = _load_scan_tasks()
+        if _sync_scan_tasks_locked(accounts, tasks):
+            _save_scan_tasks(tasks)
         return True
 
 
@@ -1569,6 +1602,60 @@ def list_scan_tasks_admin(limit: int = 500) -> list[dict]:
         ]
 
 
+def _scanner_extract_candidates(
+    accounts: list[dict],
+    tasks: list[dict],
+    scanner_id: int,
+    limit: int = 200,
+) -> list[dict]:
+    """返回扫码员可发起提链的账号，以及该扫码员正在提链的账号。"""
+    now_ts = time.time()
+    active_account_ids = {
+        int(task.get("account_id") or 0)
+        for task in tasks
+        if task.get("status") in {"pending", "claimed", "scanned"}
+    }
+    rows: list[dict] = []
+    for account in accounts:
+        account_id = int(account.get("id") or 0)
+        plan = str(account.get("current_plan_type") or account.get("plan_type") or "").strip().lower()
+        if (
+            account_id <= 0
+            or account_id in active_account_ids
+            or plan != "free"
+            or not bool(account.get("plus_trial_eligible"))
+            or not str(account.get("access_token") or "").strip()
+        ):
+            continue
+
+        status = str(account.get("extract_link_status") or "ready").strip().lower()
+        owner_id = int(account.get("extract_link_scanner_id") or 0)
+        in_progress = status in {"queued", "running"}
+        if in_progress and owner_id != int(scanner_id):
+            continue
+
+        expires_ts = _extract_link_expiry_timestamp(account.get("extract_link_expires_at"))
+        link_is_current = expires_ts is None or expires_ts > now_ts
+        if _account_has_scannable_link(account) and link_is_current:
+            continue
+
+        rows.append({
+            "account_id": account_id,
+            "email": _masked_scan_email(account.get("email") or ""),
+            "extract_link_status": status,
+            "extract_link_type": account.get("extract_link_type") or "",
+            "extract_link_message": account.get("extract_link_error") or account.get("extract_link_message") or "",
+            "owned": owner_id == int(scanner_id),
+            "can_extract": not in_progress,
+        })
+
+    rows.sort(key=lambda item: (
+        0 if item.get("owned") and item.get("extract_link_status") in {"queued", "running"} else 1,
+        -int(item.get("account_id") or 0),
+    ))
+    return rows[:max(1, min(int(limit), 500))]
+
+
 def get_scanner_queue(scanner_id: int) -> dict:
     with _LOCK:
         scanners = _load_scanners()
@@ -1607,11 +1694,15 @@ def get_scanner_queue(scanner_id: int) -> dict:
                 and task.get("status") in {"claimed", "scanned", "completed"}
             )
         ]
+        extract_candidates = _scanner_extract_candidates(accounts, tasks, int(scanner_id))
         return {
             "scanner": _public_scanner(scanner),
+            "extract_candidates": extract_candidates,
             "pending": pending,
             "mine": mine,
             "counts": {
+                "extractable": sum(bool(item.get("can_extract")) for item in extract_candidates),
+                "extracting": sum(not bool(item.get("can_extract")) for item in extract_candidates),
                 "pending": len(pending),
                 "claimed": sum(task.get("status") == "claimed" for task in mine),
                 "scanned": sum(task.get("status") == "scanned" for task in mine),

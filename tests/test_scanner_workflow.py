@@ -28,6 +28,16 @@ def _account(*, plan: str = "free", job_id: str = "job-1") -> dict:
     }
 
 
+def _extract_candidate() -> dict:
+    return {
+        "id": 52,
+        "email": "candidate-scanner@example.com",
+        "current_plan_type": "free",
+        "plus_trial_eligible": True,
+        "access_token": "fixture-access-token",
+    }
+
+
 class ScannerPersistenceTests(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -130,6 +140,44 @@ class ScannerPersistenceTests(unittest.TestCase):
         old = next(item for item in db.list_scan_tasks_admin() if item["id"] == first_id)
         self.assertEqual(old["status"], "superseded")
 
+    def test_scanner_extract_success_auto_claims_generated_task(self):
+        scanner, _ = db.create_scanner("扫码员 A")
+        db._write_json(db._ACCOUNTS_JSON, [_extract_candidate()])
+
+        before = db.get_scanner_queue(scanner["id"])
+        self.assertEqual(before["counts"]["extractable"], 1)
+        candidate = before["extract_candidates"][0]
+        self.assertEqual(candidate["email"], "ca******@example.com")
+        self.assertNotIn("access_token", candidate)
+
+        self.assertTrue(db.claim_account_extract(
+            52,
+            trigger=f"scanner:{scanner['id']}",
+            link_type="upi",
+            scanner_id=scanner["id"],
+        ))
+        db.update_account_extract(52, {
+            "ok": True,
+            "status": "success",
+            "job_id": "scanner-job",
+            "link_type": "upi",
+            "result": {
+                "payment_method": "UPI",
+                "image_url_png": "https://fixture.invalid/scanner-job.png",
+                "long_url": "https://fixture.invalid/pay/scanner-job",
+                "expires_at": time.time() + 3600,
+            },
+        })
+
+        after = db.get_scanner_queue(scanner["id"])
+        self.assertEqual(after["counts"]["extractable"], 0)
+        self.assertEqual(after["counts"]["claimed"], 1)
+        claimed = after["mine"][0]
+        self.assertEqual(claimed["status"], "claimed")
+        self.assertEqual(claimed["scanner_id"], scanner["id"])
+        self.assertEqual(claimed["qr_url"], "https://fixture.invalid/scanner-job.png")
+        self.assertGreater(claimed["lease_expires_at"], time.time())
+
 
 class ScannerRoleTests(unittest.TestCase):
     def test_scanner_login_is_restricted_to_workbench(self):
@@ -189,6 +237,34 @@ class ScannerRoleTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("仅供扫码员", response.get_json()["error"])
+
+    def test_scanner_can_enqueue_extract_without_receiving_cdk(self):
+        scanner = {
+            "id": 7,
+            "name": "扫码员 A",
+            "enabled": True,
+            "key_version": 1,
+        }
+        account = _extract_candidate()
+        queued = {"accepted": True, "busy": False, "link_type": "upi"}
+        with (
+            patch("webui.auth.db.authenticate_scanner_key", return_value=scanner),
+            patch("webui.auth.db.get_scanner", return_value=scanner),
+            patch("webui.app.db.get_account", return_value=account),
+            patch("webui.app.extract_link_service.validate_settings"),
+            patch("webui.app.extract_link_service.enqueue_account_extract", return_value=queued) as enqueue,
+        ):
+            app = create_app(auth_code="admin-code")
+            client = app.test_client()
+            client.post("/login", data={"auth_code": "scanner-key"})
+
+            response = client.post("/api/scan/accounts/52/extract")
+
+        self.assertEqual(response.status_code, 202)
+        self.assertTrue(response.get_json()["started"])
+        self.assertEqual(enqueue.call_args.kwargs["scanner_id"], scanner["id"])
+        self.assertEqual(enqueue.call_args.kwargs["trigger"], "scanner:7")
+        self.assertIsNone(enqueue.call_args.kwargs.get("cdk"))
 
 
 if __name__ == "__main__":
