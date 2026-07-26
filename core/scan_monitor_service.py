@@ -2,6 +2,7 @@
 """扫码任务自动检测服务。"""
 from __future__ import annotations
 
+import atexit
 import logging
 import threading
 import time
@@ -43,6 +44,10 @@ def _timestamp(value) -> float | None:
 
 def run_once() -> dict:
     """为已领取的扫码任务发起套餐查询，并同步已完成任务。"""
+    if not plan_check_service.is_available():
+        _STOP_EVENT.set()
+        return {"active": 0, "queued": 0, "busy": 0, "skipped": 0, "failed": 0, "stopped": 1}
+
     tasks = db.list_scan_tasks_admin(limit=5000)
     interval = _interval_seconds()
     now = time.time()
@@ -101,11 +106,15 @@ def run_once() -> dict:
             stats["busy"] += 1
         else:
             stats["failed"] += 1
+            error = str(queued.get("error") or "未知错误")
             logger.warning(
                 "[ScanAuto] 任务 #%s 自动套餐检测入队失败: %s",
                 task.get("id"),
-                queued.get("error") or "未知错误",
+                error,
             )
+            if "shutdown" in error.lower():
+                _STOP_EVENT.set()
+                break
     return stats
 
 
@@ -142,3 +151,6 @@ def stop() -> None:
         _THREAD = None
     if thread is not None and thread.is_alive():
         thread.join(timeout=2.0)
+
+
+atexit.register(stop)

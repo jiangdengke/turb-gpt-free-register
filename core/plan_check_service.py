@@ -199,3 +199,8 @@ def queue_settings() -> dict:
         "min_interval": _float_setting("PLAN_CHECK_MIN_INTERVAL", 0.4, 0.0, 30.0),
         "jitter": _float_setting("PLAN_CHECK_JITTER", 0.3, 0.0, 30.0),
     }
+
+
+def is_available() -> bool:
+    """Return whether the shared executor can still accept work."""
+    return not bool(getattr(_EXECUTOR, "_shutdown", False))
