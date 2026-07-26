@@ -102,6 +102,12 @@
     .buttons { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
     .inline-num { display:inline-flex; align-items:center; gap:6px; color:var(--muted); font-size:12px; font-weight:700; white-space:nowrap; }
     .inline-num input { width:70px; min-height:38px; margin-top:0; padding:4px 8px; }
+    .inline-num select { width:auto; min-width:140px; min-height:38px; margin-top:0; padding:6px 10px; }
+    .scan-summary { padding: 0 16px 14px; display: grid; grid-template-columns: repeat(4, minmax(120px, 1fr)); gap: 10px; }
+    .scan-summary .stat { min-width: 0; padding: 10px 12px; border: 1px solid var(--line); border-radius: 7px; background: var(--soft); }
+    .scan-summary .stat span { display: block; color: var(--muted); font-size: 12px; }
+    .scan-summary .stat strong { display: block; margin-top: 3px; font-size: 20px; }
+    @media (max-width: 760px) { .scan-summary { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
     .table-wrap { overflow: auto; border-top: 1px solid #edf1f5; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; font-size: 13px; }
     th, td { padding: 10px 12px; border-bottom: 1px solid #edf1f5; text-align: left; white-space: nowrap; vertical-align: middle; overflow: hidden; text-overflow: ellipsis; }
@@ -674,11 +680,28 @@
       </div>
     </section>
 
-    <section class="card">
+    <section class="card" id="scanTasksSection">
       <div class="toolbar">
         <div><h2>扫码任务</h2></div>
-        <div class="buttons"><button class="btn" id="btnRefreshScanTasks">刷新</button></div>
+        <div class="buttons">
+          <label class="inline-num">扫码员
+            <select id="scanTaskScannerFilter"><option value="">全部</option></select>
+          </label>
+          <label class="inline-num">状态
+            <select id="scanTaskStatusFilter">
+              <option value="">全部</option>
+              <option value="pending">待领取</option>
+              <option value="claimed">已领取</option>
+              <option value="scanned">检测中</option>
+              <option value="completed">已开通</option>
+              <option value="expired">已过期</option>
+              <option value="superseded">已替换</option>
+            </select>
+          </label>
+          <button class="btn" id="btnRefreshScanTasks">刷新</button>
+        </div>
       </div>
+      <div class="scan-summary" id="scanTaskStats"></div>
       <div class="table-wrap">
         <table>
           <colgroup><col style="width:70px"><col style="width:260px"><col style="width:110px"><col style="width:180px"><col style="width:170px"><col style="width:170px"><col style="width:170px"><col style="width:120px"></colgroup>
@@ -3035,13 +3058,45 @@ function renderScanners() {
       <td class="muted">${esc(fmtScanDate(scanner.last_login_at))}</td>
       <td class="muted">${esc(fmtScanDate(scanner.created_at))}</td>
       <td class="actions">
+        <button onclick="viewScannerTasks(${Number(scanner.id)})">查看记录</button>
         <button onclick="resetScannerKey(${Number(scanner.id)})">重置密钥</button>
         <button class="${scanner.enabled ? 'danger' : 'good'}" onclick="toggleScanner(${Number(scanner.id)}, ${scanner.enabled ? 'false' : 'true'})">${scanner.enabled ? '停用' : '启用'}</button>
       </td>
     </tr>`).join('') : '<tr><td colspan="9" class="muted center">暂无扫码员</td></tr>';
 }
+function renderScanTaskFilters() {
+  const select = $('#scanTaskScannerFilter');
+  const selected = select.value;
+  select.innerHTML = '<option value="">全部</option>' + SCANNERS.map((scanner) =>
+    `<option value="${Number(scanner.id)}">${esc(scanner.name)} (#${Number(scanner.id)})</option>`
+  ).join('');
+  if (Array.from(select.options).some((option) => option.value === selected)) {
+    select.value = selected;
+  }
+}
+function filteredScanTasks() {
+  const scannerId = $('#scanTaskScannerFilter').value;
+  const status = $('#scanTaskStatusFilter').value;
+  return SCAN_TASKS.filter((task) =>
+    (!scannerId || String(task.scanner_id || '') === scannerId) &&
+    (!status || task.status === status)
+  );
+}
+function renderScanTaskStats(tasks) {
+  const checking = tasks.filter((task) => ['claimed', 'scanned'].includes(task.status)).length;
+  const completed = tasks.filter((task) => task.status === 'completed').length;
+  const expired = tasks.filter((task) => task.status === 'expired').length;
+  $('#scanTaskStats').innerHTML = [
+    ['总任务', tasks.length],
+    ['检测中', checking],
+    ['已开通', completed],
+    ['已过期', expired],
+  ].map(([label, value]) => `<div class="stat"><span>${label}</span><strong>${value}</strong></div>`).join('');
+}
 function renderScanTasks() {
-  $('#scanTasksBody').innerHTML = SCAN_TASKS.length ? SCAN_TASKS.map((task) => `
+  const tasks = filteredScanTasks();
+  renderScanTaskStats(tasks);
+  $('#scanTasksBody').innerHTML = tasks.length ? tasks.map((task) => `
     <tr>
       <td class="muted">#${esc(task.id)}</td>
       <td><div class="main-cell">${esc(task.email)}</div><div class="sub-cell">账号 #${esc(task.account_id)}</div></td>
@@ -3051,7 +3106,13 @@ function renderScanTasks() {
       <td class="muted">${esc(fmtScanDate(task.scanned_at))}</td>
       <td class="muted">${esc(fmtScanDate(task.link_expires_at))}</td>
       <td class="actions">${task.status === 'claimed' ? `<button class="danger" onclick="adminReleaseScanTask(${Number(task.id)})">释放</button>` : '<span class="muted">-</span>'}</td>
-    </tr>`).join('') : '<tr><td colspan="8" class="muted center">暂无扫码任务</td></tr>';
+    </tr>`).join('') : '<tr><td colspan="8" class="muted center">暂无符合条件的扫码任务</td></tr>';
+}
+function viewScannerTasks(scannerId) {
+  $('#scanTaskScannerFilter').value = String(scannerId);
+  $('#scanTaskStatusFilter').value = '';
+  renderScanTasks();
+  $('#scanTasksSection').scrollIntoView({behavior: 'smooth', block: 'start'});
 }
 async function loadScanners() {
   try {
@@ -3062,6 +3123,7 @@ async function loadScanners() {
     SCANNERS = scannerData.items || [];
     SCAN_TASKS = taskData.items || [];
     renderScanners();
+    renderScanTaskFilters();
     renderScanTasks();
   } catch (error) {
     showToast('扫码员数据加载失败: ' + error.message);
@@ -3091,6 +3153,8 @@ $('#btnCreateScanner').addEventListener('click', async () => {
 $('#btnCopyScannerKey').addEventListener('click', () => copyText($('#scannerKeyValue').value));
 $('#btnRefreshScanners').addEventListener('click', loadScanners);
 $('#btnRefreshScanTasks').addEventListener('click', loadScanners);
+$('#scanTaskScannerFilter').addEventListener('change', renderScanTasks);
+$('#scanTaskStatusFilter').addEventListener('change', renderScanTasks);
 async function resetScannerKey(scannerId) {
   const scanner = SCANNERS.find((item) => Number(item.id) === Number(scannerId));
   if (!confirm(`确定重置“${scanner?.name || scannerId}”的密钥吗？旧密钥和已有登录会立即失效。`)) return;
