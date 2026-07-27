@@ -1066,15 +1066,14 @@ def _wait_after_phone_otp_submit(driver, timeout: int = 20) -> str:
 def _classify_phone_page_failure(state: dict) -> str:
     if _is_phone_code_state(state):
         return ''
-    # WhatsApp 用 DOM radio value 判断；其它发送失败用服务端/页面错误文本兜底。
+    # WhatsApp 只按当前选中的 DOM radio 判断。页面可能同时展示 SMS/WhatsApp
+    # 文案，不能仅凭 bodyText 出现 WhatsApp 就判定通道错误。
     radios = state.get('radios') or []
     if any('whatsapp' in str(r.get('value','')).lower().replace(' ', '') and r.get('checked') for r in radios):
         return 'whatsapp_channel'
     text = str(state.get('bodyText') or '').lower()
     if 'invalid_auth_step' in text or 'invalid auth step' in text:
         return 'invalid_auth_step'
-    if 'whatsapp' in text or 'whats app' in text:
-        return 'whatsapp_channel'
     if any(k in text for k in ('invalid phone', 'not a valid phone', 'phone number is not valid', '号码无效', '手机号无效')):
         return 'invalid_phone'
     if any(k in text for k in (
@@ -1086,6 +1085,38 @@ def _classify_phone_page_failure(state: dict) -> str:
     if any(k in text for k in ('too many', 'rate limit', 'throttle', '频繁', '限流')):
         return 'send_limited'
     return ''
+
+
+def _prepare_add_phone_submission(
+    driver,
+    phone: str,
+    *,
+    reason: str = "prepare-phone",
+) -> tuple[dict, dict]:
+    """先固定短信通道，再填写并复验号码，避免通道切换重渲染清空输入框。"""
+    _ensure_add_phone_input(driver, reason=reason)
+    logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
+    _select_sms_channel_or_raise(driver)
+    _blur_active_input_and_wait(driver, label="短信通道确认完成")
+
+    logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
+    phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
+    logger.info(
+        "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
+        phone_fill.get("e164"), phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
+        phone_fill.get("dialCode") or "-",
+        str(phone_fill.get("selectedText") or "-") + (" [changed]" if phone_fill.get("selectedChanged") else ""),
+    )
+    _blur_active_input_and_wait(driver, label="手机号输入完成")
+    expected_e164 = str(phone_fill.get("e164") or f"+{phone}")
+    phone_verify = _verify_add_phone_value_before_submit(driver, expected_e164)
+    logger.info(
+        "[Codex][Browser] 手机号提交前校验通过：visible=%s hidden=%s",
+        phone_verify.get("visibleValue"),
+        phone_verify.get("hiddenValue") or "-",
+    )
+    return phone_fill, phone_verify
+
 
 def _sleep_before_phone_retry(attempt: int, max_retries: int, *, prefix: str = "[Codex][Browser]") -> None:
     """换号前随机等待，至少 3 秒，避免连续提交号码过快。"""
@@ -1122,20 +1153,7 @@ def _do_phone_verification_if_present(driver) -> None:
             try:
                 activation_id, phone = sms_provider.acquire_number(http)
                 logger.info("[Codex][Browser] 手机验证尝试 %s/%s，provider=%s，号码=+%s", attempt, max_retries, provider, phone)
-                logger.info("[Codex][Browser] 准备手机号输入页，重新设置新手机号")
-                _ensure_add_phone_input(driver, reason=f"attempt-{attempt}")
-                phone_fill = _set_phone_value(driver, f"+{phone}", timeout=10)
-                logger.info(
-                    "[Codex][Browser] 已重新设置手机号：e164=%s visible=%s hidden=%s dialCode=%s country=%s",
-                    phone_fill.get("e164"), phone_fill.get("actualVisible"), phone_fill.get("hiddenValue") or "-",
-                    phone_fill.get("dialCode") or "-", (str(phone_fill.get("selectedText") or "-") + (" [changed]" if phone_fill.get("selectedChanged") else "")),
-                )
-                _blur_active_input_and_wait(driver, label="手机号输入完成")
-                phone_verify = _verify_add_phone_value_before_submit(driver, str(phone_fill.get("e164") or f"+{phone}"))
-                logger.info("[Codex][Browser] 手机号提交前校验通过：visible=%s hidden=%s", phone_verify.get("visibleValue"), phone_verify.get("hiddenValue") or "-")
-                logger.info("[Codex][Browser] 检查并选择 SMS 短信通道")
-                _select_sms_channel_or_raise(driver)
-                _blur_active_input_and_wait(driver, label="短信通道确认完成")
+                _prepare_add_phone_submission(driver, phone, reason=f"attempt-{attempt}")
                 submit_info = _click_add_phone_continue_button(driver, timeout=10)
                 logger.info("[Codex][Browser] 已点击手机号 Continue/続行 按钮：%s，等待进入短信验证码页", submit_info)
                 _wait_page_settle_after_submit()
