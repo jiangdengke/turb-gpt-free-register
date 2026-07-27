@@ -779,33 +779,11 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
       if (!visibleValue) visibleValue = e164;
     }
 
-    const setNativeValue = (el, value) => {
-      const proto = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      el.focus();
-      if (setter) setter.call(el, ''); else el.value = '';
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-      if (setter) setter.call(el, value); else el.value = value;
-      el.dispatchEvent(new Event('input', {bubbles:true}));
-      el.dispatchEvent(new Event('change', {bubbles:true}));
-    };
-
     phoneInput.scrollIntoView({block:'center'});
-    setNativeValue(phoneInput, visibleValue);
-    if (hiddenPhoneNumberInput) {
-      hiddenPhoneNumberInput.value = e164;
-      hiddenPhoneNumberInput.dispatchEvent(new Event('input', {bubbles:true}));
-      hiddenPhoneNumberInput.dispatchEvent(new Event('change', {bubbles:true}));
-    }
-    phoneInput.blur();
-    document.body?.focus?.();
     return {
       ok: true,
       e164,
       visibleValue,
-      actualVisible: phoneInput.value || '',
-      hiddenValue: hiddenPhoneNumberInput ? (hiddenPhoneNumberInput.value || '') : '',
       dialCode,
       selectedText,
       selectedChanged,
@@ -816,10 +794,61 @@ def _set_phone_value(driver, phone: str, *, timeout: int = 10) -> dict:
     """, phone)
     if not result or not result.get("ok"):
         raise RuntimeError(f"手机号写入失败 result={result} state={_phone_page_state(driver)}")
-    actual = str(result.get("actualVisible") or "").strip()
+
     visible_value = str(result.get("visibleValue") or "").strip()
-    hidden_value = str(result.get("hiddenValue") or "").strip()
     e164 = str(result.get("e164") or "").strip()
+    phone_input = _find_any(driver, _PHONE_INPUT_SELECTORS, timeout=timeout)
+    try:
+        from selenium.webdriver.common.keys import Keys
+        import platform
+
+        modifier = Keys.COMMAND if platform.system().lower() == "darwin" else Keys.CONTROL
+        driver.execute_script("arguments[0].scrollIntoView({block:'center'}); arguments[0].focus();", phone_input)
+        phone_input.click()
+        phone_input.send_keys(modifier, "a")
+        phone_input.send_keys(Keys.BACKSPACE)
+        phone_input.send_keys(visible_value)
+    except Exception as exc:
+        raise RuntimeError(
+            f"手机号真实键盘输入失败 value={visible_value}: {type(exc).__name__}: {exc}"
+        ) from exc
+
+    time.sleep(0.3)
+    typed_state = driver.execute_script(r"""
+    const e164 = String(arguments[0] || '').trim();
+    const visible = el => !!(el && (el.offsetWidth || el.offsetHeight || el.getClientRects().length));
+    const form = document.querySelector('form[action*="/add-phone" i]')
+      || [...document.querySelectorAll('form')].find(f => /add-phone/i.test(f.getAttribute('action') || ''));
+    if (!form) return {ok:false, error:'missing_add_phone_form', url:location.href};
+    const input = [...form.querySelectorAll('input[type="tel"], input[name="__reservedForPhoneNumberInput_tel"], input[autocomplete="tel"], input[name="phone"], input[name="phone_number"]')]
+      .find(visible);
+    if (!input) return {ok:false, error:'missing_phone_input', url:location.href};
+    const hidden = form.querySelector('input[name="phoneNumber"]');
+    const digits = value => String(value || '').replace(/\D+/g, '');
+    if (hidden && digits(hidden.value) !== digits(e164)) {
+      const previous = hidden.value || '';
+      const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
+      if (setter) setter.call(hidden, e164); else hidden.value = e164;
+      if (hidden._valueTracker) hidden._valueTracker.setValue(previous);
+      hidden.dispatchEvent(new InputEvent('input', {bubbles:true, inputType:'insertText', data:e164}));
+      hidden.dispatchEvent(new Event('change', {bubbles:true}));
+    }
+    return {
+      ok:true,
+      actualVisible:input.value || '',
+      hiddenValue:hidden ? (hidden.value || '') : '',
+      inputName:input.getAttribute('name') || '',
+      inputId:input.id || '',
+      inputMethod:'send_keys',
+      url:location.href,
+    };
+    """, e164) or {}
+    if not typed_state.get("ok"):
+        raise RuntimeError(f"手机号真实输入后状态读取失败 result={typed_state} state={_phone_page_state(driver)}")
+    result.update(typed_state)
+
+    actual = str(result.get("actualVisible") or "").strip()
+    hidden_value = str(result.get("hiddenValue") or "").strip()
     # OpenAI/React-Aria 电话框会自动格式化，例如 +84925154291 -> +84 925 154 291。
     # 不能按界面字符串精确比较，只比较数字归一化后的值。
     actual_digits = ''.join(ch for ch in actual if ch.isdigit())

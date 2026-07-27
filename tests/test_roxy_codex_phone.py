@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, call, patch
 
 from core.roxy_codex_oauth import (
     _classify_phone_page_failure,
     _prepare_add_phone_submission,
+    _set_phone_value,
 )
 
 
@@ -35,6 +36,53 @@ class RoxyCodexPhoneTests(unittest.TestCase):
             _classify_phone_page_failure(state),
             "whatsapp_channel",
         )
+
+    @patch("core.roxy_codex_oauth.time.sleep")
+    @patch("core.roxy_codex_oauth._find_any")
+    @patch("core.roxy_codex_oauth._has_strict_add_phone_form", return_value=True)
+    def test_phone_value_uses_real_keyboard_events(
+        self,
+        has_form,
+        find_any,
+        sleep,
+    ):
+        driver = MagicMock()
+        phone_input = MagicMock()
+        find_any.return_value = phone_input
+        driver.execute_script.side_effect = [
+            {
+                "ok": True,
+                "e164": "+14752745378",
+                "visibleValue": "+14752745378",
+                "dialCode": "",
+                "selectedText": "United States (+1)",
+                "selectedChanged": False,
+                "inputName": "__reservedForPhoneNumberInput_tel",
+                "inputId": "",
+                "url": "https://auth.openai.com/add-phone",
+            },
+            None,
+            {
+                "ok": True,
+                "actualVisible": "+1 475 274 5378",
+                "hiddenValue": "+14752745378",
+                "inputName": "__reservedForPhoneNumberInput_tel",
+                "inputId": "",
+                "inputMethod": "send_keys",
+                "url": "https://auth.openai.com/add-phone",
+            },
+        ]
+
+        result = _set_phone_value(driver, "+14752745378")
+
+        self.assertEqual(result["inputMethod"], "send_keys")
+        self.assertEqual(phone_input.send_keys.call_count, 3)
+        self.assertEqual(
+            phone_input.send_keys.call_args_list[-1],
+            call("+14752745378"),
+        )
+        find_any.assert_called_once()
+        has_form.assert_called_once_with(driver)
 
     @patch("core.roxy_codex_oauth._verify_add_phone_value_before_submit")
     @patch("core.roxy_codex_oauth._set_phone_value")
