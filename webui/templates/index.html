@@ -1567,7 +1567,7 @@
     .outlook-panel-v2 .jobs-v2-pager { border-top: 1px solid #ebeef5; }
 
     /* ---- 邮箱池导入弹窗 ---- */
-    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden) {
+    #outlookImportModal:not(.hidden), #emailChangeModalV2:not(.hidden), #proxyDiagnosticModalV2:not(.hidden) {
       position: fixed; inset: 0; z-index: 1200;
       display: flex; align-items: center; justify-content: center;
       padding: 24px; box-sizing: border-box;
@@ -1579,6 +1579,18 @@
       background: #fff; border-radius: 12px; border: 1px solid #ebeef5;
       box-shadow: 0 24px 70px rgba(15,23,42,.28); overflow: hidden;
     }
+    .proxy-diagnostic-result {
+      display: grid; gap: 10px; padding: 12px 14px;
+      border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc;
+      color: #606266; font-size: 13px; line-height: 1.5;
+    }
+    .proxy-diagnostic-result.is-ok { border-color: #b7ebd8; background: #f2fbf7; color: #166534; }
+    .proxy-diagnostic-result.is-error { border-color: #fbc4c4; background: #fff7f7; color: #b3261e; }
+    .proxy-diagnostic-result-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; font-weight: 700; }
+    .proxy-diagnostic-result-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px 16px; color: #606266; font-weight: 400; }
+    .proxy-diagnostic-result-grid span { overflow-wrap: anywhere; }
+    .proxy-diagnostic-result-grid b { color: #303133; font-weight: 600; }
+    @media (max-width: 640px) { .proxy-diagnostic-result-grid { grid-template-columns: 1fr; } }
     .outlook-import-head {
       display: flex; align-items: flex-start; gap: 12px;
       padding: 20px 20px 14px; border-bottom: 1px solid #ebeef5;
@@ -2608,6 +2620,34 @@
       <div class="banner warn">换绑成功后当前 access_token 会失效并被清空，系统会立即使用新邮箱自动查活并刷新 AT。原邮箱会保留在账号记录中。</div>
     </div>
     <div class="outlook-import-foot"><button type="button" class="jobs-tb-btn" id="btnCancelEmailChangeV2">取消</button><button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnSubmitEmailChangeV2">开始换绑</button></div>
+  </div>
+</div>
+<div id="proxyDiagnosticModalV2" class="hidden" role="dialog" aria-modal="true" aria-labelledby="proxyDiagnosticTitleV2">
+  <div class="outlook-import-dialog" role="document" style="max-width:620px;">
+    <div class="outlook-import-head">
+      <div class="outlook-import-head-main">
+        <h3 id="proxyDiagnosticTitleV2">测试代理</h3>
+        <p>只测试代理连通性、目标地址响应和出口 GeoIP，不会执行注册、查活、查套餐或账号操作。</p>
+      </div>
+      <button type="button" class="outlook-import-close" id="btnCloseProxyDiagnosticV2" aria-label="关闭">×</button>
+    </div>
+    <div class="outlook-import-body">
+      <label class="outlook-import-field">
+        <span>代理地址</span>
+        <input id="proxyDiagnosticProxyV2" type="text" placeholder="http://user:pass@host:port 或 host:port:user:pass" autocomplete="off" spellcheck="false">
+        <span class="outlook-import-hint">留空表示测试直连；密码只用于本次请求，不会保存。</span>
+      </label>
+      <label class="outlook-import-field">
+        <span>测试地址</span>
+        <input id="proxyDiagnosticTargetV2" type="text" value="https://chatgpt.com/" autocomplete="off" spellcheck="false">
+        <span class="outlook-import-hint">即使目标返回 HTTP 403，只要收到响应，也会显示“代理可达”。</span>
+      </label>
+      <div id="proxyDiagnosticResultV2" class="proxy-diagnostic-result" hidden></div>
+    </div>
+    <div class="outlook-import-foot">
+      <button type="button" class="jobs-tb-btn" id="btnCancelProxyDiagnosticV2">关闭</button>
+      <button type="button" class="jobs-tb-btn jobs-tb-btn--primary" id="btnRunProxyDiagnosticV2">开始测试</button>
+    </div>
   </div>
 </div>
 <div class="body hidden" id="logPanel">
@@ -6339,6 +6379,25 @@ function renderConfigPlainFieldV2(f) {
     : field;
   return decorated + renderConfigRecommendedLinks(f);
 }
+function getConfigListV2(key) {
+  const value = Object.prototype.hasOwnProperty.call(CONFIG_PENDING_UPDATES, key)
+    ? CONFIG_PENDING_UPDATES[key]
+    : ((CONFIG || []).find(f => f.key === key) || {}).value;
+  if (Array.isArray(value)) return value.map(v => String(v || '').trim()).filter(Boolean);
+  return String(value || '').split(/\r?\n/).map(v => v.trim()).filter(Boolean);
+}
+function renderProxyDiagnosticToolsV2() {
+  return `
+    <div class="config-connection-v2" id="proxyDiagnosticToolsV2">
+      <div class="config-connection-v2-head">
+        <span class="config-connection-v2-title">代理连通性测试</span>
+        <button type="button" class="btn" id="btnOpenProxyDiagnosticV2">测试代理</button>
+      </div>
+      <p class="config-connection-v2-status" id="proxyDiagnosticStatusV2">尚未测试</p>
+      <p class="config-connection-v2-help">测试代理是否可达、目标 HTTP 状态、响应延迟和实际出口 IP/地区；不会执行账号操作。</p>
+    </div>
+  `;
+}
 function renderChatGPT2APIToolsV2() {
   return `
     <div class="config-connection-v2" id="chatgpt2apiConnectionV2">
@@ -6355,7 +6414,11 @@ function renderMixedConfigSectionV2(name, fields, intro) {
   const slug = configGroupSlug(name);
   const switches = fields.filter(f => f.type === 'bool');
   const inputs = fields.filter(f => f.type !== 'bool');
-  const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : (name === '账号池同步' ? renderChatGPT2APIToolsV2() : '');
+  const extra = name === 'RoxyBrowser'
+    ? renderRoxyWorkspaceToolsV2()
+    : (name === '账号池同步'
+      ? renderChatGPT2APIToolsV2()
+      : (name === '代理池' ? renderProxyDiagnosticToolsV2() : ''));
   return `
     <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
       ${renderConfigSectionHead(name, intro || '')}
@@ -6496,6 +6559,101 @@ function bindCloudMailToolsV2() {
     domainBtn.dataset.bound = '1';
     domainBtn.addEventListener('click', () => loadCloudMailDomainsV2());
   }
+}
+function _proxyDiagnosticDefaultV2() {
+  return getConfigListV2('PLAN_CHECK_PROXY')[0] || getConfigListV2('PROXY_POOL')[0] || '';
+}
+function openProxyDiagnosticV2() {
+  const modal = $('#proxyDiagnosticModalV2');
+  if (!modal) return;
+  const proxyEl = $('#proxyDiagnosticProxyV2');
+  const targetEl = $('#proxyDiagnosticTargetV2');
+  const resultEl = $('#proxyDiagnosticResultV2');
+  if (proxyEl) proxyEl.value = _proxyDiagnosticDefaultV2();
+  if (targetEl && !targetEl.value) targetEl.value = 'https://chatgpt.com/';
+  if (resultEl) { resultEl.hidden = true; resultEl.innerHTML = ''; }
+  modal.classList.remove('hidden');
+  updateModalScrollLock();
+  if (proxyEl) setTimeout(() => proxyEl.focus(), 50);
+}
+function closeProxyDiagnosticV2() {
+  const modal = $('#proxyDiagnosticModalV2');
+  if (!modal) return;
+  modal.classList.add('hidden');
+  updateModalScrollLock();
+}
+function renderProxyDiagnosticResultV2(result) {
+  const ok = !!result?.ok;
+  if (!ok) {
+    return `<div class="proxy-diagnostic-result-head"><span>${esc(result?.message || '代理不可用')}</span></div><div>${esc(result?.error || '未返回具体错误')}</div>`;
+  }
+  const location = [result.country, result.region, result.city].filter(Boolean).join(' / ') || '未知';
+  const geoExtra = result.geo_error ? `<div>${esc(result.geo_error)}</div>` : '';
+  return `<div class="proxy-diagnostic-result-head"><span>${esc(result.message || '代理可达')}</span><span>${esc(String(result.latency_ms ?? '-'))} ms</span></div>
+    <div class="proxy-diagnostic-result-grid">
+      <span><b>测试地址</b> ${esc(result.target_url || '-')}</span>
+      <span><b>HTTP</b> ${esc(String(result.http_status ?? '-'))}</span>
+      <span><b>出口 IP</b> ${esc(result.exit_ip || '未获取')}</span>
+      <span><b>地区</b> ${esc(location)}</span>
+      <span><b>时区</b> ${esc(result.timezone || '-')}</span>
+      <span><b>运营商</b> ${esc(result.org || '-')}</span>
+    </div>${geoExtra}`;
+}
+function bindProxyDiagnosticToolsV2() {
+  const openBtn = $('#btnOpenProxyDiagnosticV2');
+  if (openBtn && !openBtn.dataset.bound) {
+    openBtn.dataset.bound = '1';
+    openBtn.addEventListener('click', openProxyDiagnosticV2);
+  }
+  const modal = $('#proxyDiagnosticModalV2');
+  if (!modal || modal.dataset.bound) return;
+  modal.dataset.bound = '1';
+  const closeBtn = $('#btnCloseProxyDiagnosticV2');
+  const cancelBtn = $('#btnCancelProxyDiagnosticV2');
+  const runBtn = $('#btnRunProxyDiagnosticV2');
+  if (closeBtn) closeBtn.addEventListener('click', closeProxyDiagnosticV2);
+  if (cancelBtn) cancelBtn.addEventListener('click', closeProxyDiagnosticV2);
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) closeProxyDiagnosticV2();
+  });
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !modal.classList.contains('hidden')) closeProxyDiagnosticV2();
+  });
+  if (runBtn) runBtn.addEventListener('click', async () => {
+    const proxyEl = $('#proxyDiagnosticProxyV2');
+    const targetEl = $('#proxyDiagnosticTargetV2');
+    const resultEl = $('#proxyDiagnosticResultV2');
+    const statusEl = $('#proxyDiagnosticStatusV2');
+    runBtn.disabled = true;
+    runBtn.textContent = '测试中…';
+    if (resultEl) { resultEl.hidden = false; resultEl.className = 'proxy-diagnostic-result'; resultEl.textContent = '正在请求测试地址并查询出口 GeoIP…'; }
+    try {
+      const result = await api('/api/proxy/test', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({
+          proxy: proxyEl?.value?.trim() || '',
+          target_url: targetEl?.value?.trim() || 'https://chatgpt.com/',
+        }),
+      });
+      if (resultEl) {
+        resultEl.className = `proxy-diagnostic-result ${result.ok ? 'is-ok' : 'is-error'}`;
+        resultEl.innerHTML = renderProxyDiagnosticResultV2(result);
+      }
+      if (statusEl) {
+        statusEl.className = `config-connection-v2-status ${result.ok ? 'is-ok' : 'is-error'}`;
+        statusEl.textContent = result.ok
+          ? `${result.message || '代理可达'} · ${result.exit_ip || '未获取出口 IP'}`
+          : (result.message || '代理不可用');
+      }
+    } catch (e) {
+      if (resultEl) { resultEl.hidden = false; resultEl.className = 'proxy-diagnostic-result is-error'; resultEl.textContent = `测试失败：${e.message}`; }
+      if (statusEl) { statusEl.className = 'config-connection-v2-status is-error'; statusEl.textContent = `测试失败：${e.message}`; }
+    } finally {
+      runBtn.disabled = false;
+      runBtn.textContent = '开始测试';
+    }
+  });
 }
 function bindChatGPT2APIToolsV2() {
   const btn = $('#btnTestChatGPT2API');
@@ -6719,6 +6877,7 @@ function renderConfigLayoutV2() {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindProxyDiagnosticToolsV2();
   bindChatGPT2APIToolsV2();
 }
 function scrollToConfigSection(slug) {

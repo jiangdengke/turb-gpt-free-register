@@ -2969,6 +2969,28 @@ def create_app(auth_code: str | None = None) -> Flask:
                 "message": f"连接测试失败：{type(exc).__name__}",
             })
 
+    @app.post("/api/proxy/test")
+    def api_proxy_test():
+        """Read-only proxy reachability and exit-geo diagnostic."""
+        data = request.get_json(silent=True) or {}
+        try:
+            from core.proxy_diagnostics import test_proxy
+            result = test_proxy(
+                proxy=data.get("proxy") or "",
+                target_url=data.get("target_url") or "",
+                timeout=data.get("timeout", 15),
+            )
+            return jsonify(result)
+        except ValueError as exc:
+            return jsonify({"ok": False, "status": "invalid", "message": str(exc)}), 400
+        except Exception as exc:
+            logger.exception("代理测试失败")
+            return jsonify({
+                "ok": False,
+                "status": "error",
+                "message": f"代理测试失败：{type(exc).__name__}",
+            }), 500
+
     @app.post("/api/config")
     def api_config_set():
         data = request.get_json(silent=True) or {}
