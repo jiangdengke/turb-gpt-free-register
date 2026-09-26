@@ -89,3 +89,8 @@ webui.log
 webui.pid
 logs/
 run/
+
+# Local inspection / transaction records / agent instructions
+.tmp-chatgpt2api-inspect/
+artifacts/
+AGENTS.md
