@@ -1680,6 +1680,16 @@ def _save_sub2_local_record(
 # 入口
 # ============================================================
 
+def _resolve_codex_proxy(proxy: str | None) -> str | None:
+    """Resolve Codex proxy mode without changing the global proxy pool."""
+    if proxy is not None:
+        return proxy
+    mode = str(getattr(_cfg, "CODEX_PROXY_MODE", "pool") or "pool").strip().lower()
+    if mode in {"direct", "none", "off"}:
+        return ""
+    return None
+
+
 def run_codex_oauth(
     email: str,
     otp_provider=None,
@@ -1707,6 +1717,8 @@ def run_codex_oauth(
     if not email:
         return _codex_result(status="skipped", message="email 为空")
 
+    proxy = _resolve_codex_proxy(proxy)
+
     # Codex OAuth 支持多种驱动：
     # protocol：原纯协议；roxy/cloak/browser_use：用真实浏览器跑页面并捕获 localhost callback。
     try:
@@ -1716,6 +1728,20 @@ def run_codex_oauth(
         if oauth_driver == "same_as_registration":
             oauth_driver = str(getattr(_roxy_cfg, "REGISTRATION_DRIVER", "protocol") or "protocol").strip().lower()
         if oauth_driver in ("roxy", "roxybrowser", "fingerprint", "browser"):
+            # 只读预检放在创建 Roxy Profile 和 OAuth 登录之前，服务不可用时不消耗邮箱/短信资源。
+            from core.roxybrowser_client import RoxyBrowserClient
+            availability = RoxyBrowserClient().check_availability()
+            if not availability.get("ok"):
+                message = str(availability.get("message") or "Roxy API 不可用")
+                logger.error("[Codex][Roxy] 预检失败：%s", message)
+                return _codex_result(status="failed", email=email, message=message)
+            logger.info(
+                "[Codex][Roxy] 预检通过：reachable=%s status=%s reason=%s elapsed_ms=%s",
+                availability.get("reachable"),
+                availability.get("status_code"),
+                availability.get("reason"),
+                availability.get("elapsed_ms"),
+            )
             from core.roxy_codex_oauth import run_roxy_codex_oauth
             return run_roxy_codex_oauth(email, otp_provider=otp_provider, proxy=proxy, force=True)
         if oauth_driver in ("browser_use", "browseruse", "browser-use", "bu"):

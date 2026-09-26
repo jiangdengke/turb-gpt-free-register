@@ -3,6 +3,8 @@ import copy
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from core.roxybrowser_client import RoxyBrowserClient
 
 
@@ -104,6 +106,37 @@ class RoxyBrowserClientRetryTests(unittest.TestCase):
         self.assertTrue(result["data"]["ok"])
         self.assertEqual(len(client.http.calls), 2)
         sleep_mock.assert_called_once_with(2.0)
+    def test_availability_connection_failure_is_single_read_only_request(self):
+        client = self._client([requests.ConnectionError("connection refused")])
+
+        result = client.check_availability(timeout=1)
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["reachable"])
+        self.assertEqual(result["reason"], "unreachable")
+        self.assertIn("启动 RoxyBrowser", result["message"])
+        self.assertEqual(len(client.http.calls), 1)
+        self.assertEqual(client.http.calls[0]["method"], "GET")
+        self.assertTrue(client.http.calls[0]["url"].endswith("/browser/workspace"))
+
+    def test_availability_reports_auth_failure_without_exposing_token(self):
+        client = self._client([_FakeResponse({"error": "unauthorized"}, status_code=401)])
+
+        result = client.check_availability(timeout=1)
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["reason"], "auth")
+        self.assertIn("ROXY_API_TOKEN 为空", result["message"])
+
+    def test_availability_allows_unknown_read_only_endpoint_when_service_responds(self):
+        client = self._client([_FakeResponse({"error": "not found"}, status_code=404)])
+
+        result = client.check_availability(timeout=1)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["reachable"])
+        self.assertEqual(result["reason"], "endpoint_mismatch")
 
 
 if __name__ == "__main__":

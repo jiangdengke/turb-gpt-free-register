@@ -273,6 +273,14 @@ EDITABLE_FIELDS = [
         "label": "删除接口路径", "help": "默认 /browser/delete；如 Roxy 版本不同可调整",
     },
     {
+        "key": "CODEX_PROXY_MODE", "file": "codex.py", "type": "str", "group": "Codex",
+        "label": "Codex代理模式", "help": "pool=使用全局代理池；direct=Codex授权直连。只影响Codex，不改变注册代理池",
+        "choices": [
+            {"value": "pool", "label": "使用全局代理池"},
+            {"value": "direct", "label": "Codex直连"},
+        ],
+    },
+    {
         "key": "CODEX_OAUTH_DRIVER", "file": "codex.py", "type": "str", "group": "Codex",
         "label": "Codex授权驱动", "help": "默认推荐 roxy；protocol=原协议授权；roxy=用 RoxyBrowser；cloak=用 CloakBrowser；browser_use=用 Browser Use Cloud；skyvern=用 Skyvern；same_as_registration=跟随注册驱动",
     },
@@ -744,8 +752,12 @@ EDITABLE_FIELDS = [
         "label": "单号等短信(秒)", "help": "单个号等待短信到达的最长秒数，超时则换号",
     },
     {
+        "key": "SMS_API_BASE", "file": "codex.py", "type": "str", "group": "接码平台",
+        "label": "短信 API 地址", "help": "Grizzly/HeroSMS 兼容 handler API 地址；默认 https://api.grizzlysms.com/stubs/handler_api.php",
+    },
+    {
         "key": "SMS_API_KEY", "file": "codex.py", "type": "str", "group": "接码平台",
-        "label": "GrizzlySMS API密钥", "help": "GrizzlySMS 平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
+        "label": "Grizzly/HeroSMS API密钥", "help": "兼容 SMS-Activate 协议的短信平台 API Key，保存在 .env（SMS_API_KEY），不写回 config/*.py",
         "storage": "env", "secret": True,
     },
     {

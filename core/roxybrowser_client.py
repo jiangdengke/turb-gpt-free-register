@@ -59,6 +59,19 @@ def _join_url(base: str, path: str) -> str:
     return urljoin(base.rstrip("/") + "/", path.lstrip("/"))
 
 
+def _mask_api_base(value: str) -> str:
+    """隐藏 API 基址中可能误填的认证信息，避免预检错误泄露密钥。"""
+    try:
+        parsed = urlparse(str(value or "").strip())
+        if parsed.username or parsed.password:
+            host = parsed.hostname or ""
+            port = f":{parsed.port}" if parsed.port else ""
+            return parsed._replace(netloc=f"***:***@{host}{port}").geturl()
+    except Exception:
+        pass
+    return str(value or "").strip()
+
+
 def _mask_proxy(proxy_url: str) -> str:
     parsed = urlparse(str(proxy_url or "").strip())
     if parsed.username or parsed.password:
@@ -219,6 +232,93 @@ class RoxyBrowserClient:
                 "Content-Type": "application/json",
                 "Accept": "application/json",
             })
+
+    def check_availability(self, *, timeout: float | None = None) -> dict:
+        """只读探测 Roxy API，避免不可用服务触发 /browser/create 重试。"""
+        base = _mask_api_base(self.api_base)
+        try:
+            parsed = urlparse(self.api_base)
+            if parsed.scheme not in ("http", "https") or not parsed.netloc:
+                return {
+                    "ok": False,
+                    "reachable": False,
+                    "reason": "invalid_url",
+                    "message": f"Roxy API 地址无效：{base}；请检查 ROXY_API_BASE",
+                }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "reachable": False,
+                "reason": "invalid_url",
+                "message": f"Roxy API 地址无效：{base}；{type(exc).__name__}: {exc}",
+            }
+
+        try:
+            request_timeout = max(
+                1.0,
+                float(timeout if timeout is not None else getattr(_cfg, "ROXY_HEALTHCHECK_TIMEOUT", 8) or 8),
+            )
+        except (TypeError, ValueError):
+            request_timeout = 8.0
+        url = _join_url(self.api_base, "/browser/workspace")
+        started = time.monotonic()
+        try:
+            # /browser/workspace 只读；任何 HTTP 响应都证明本地进程已监听。
+            resp = self.http.request("GET", url, timeout=request_timeout)
+        except Exception as exc:
+            detail = str(exc).replace("\n", " ")[:260]
+            return {
+                "ok": False,
+                "reachable": False,
+                "reason": "unreachable",
+                "status_code": None,
+                "elapsed_ms": round((time.monotonic() - started) * 1000),
+                "message": (
+                    f"Roxy API 不可达：{base}；请先启动 RoxyBrowser 并启用 API，"
+                    f"或检查 ROXY_API_BASE。原始错误：{detail}"
+                ),
+            }
+
+        status_code = int(getattr(resp, "status_code", 0) or 0)
+        elapsed_ms = round((time.monotonic() - started) * 1000)
+        if status_code in (401, 403):
+            token_state = "ROXY_API_TOKEN 为空" if not self.token else "ROXY_API_TOKEN 无效或已失效"
+            return {
+                "ok": False,
+                "reachable": True,
+                "reason": "auth",
+                "status_code": status_code,
+                "elapsed_ms": elapsed_ms,
+                "message": f"Roxy API 已连接但鉴权失败（HTTP {status_code}）：{token_state}；请在 Roxy API 配置中启用接口并更新 token",
+            }
+        if status_code >= 500:
+            return {
+                "ok": False,
+                "reachable": True,
+                "reason": "server_error",
+                "status_code": status_code,
+                "elapsed_ms": elapsed_ms,
+                "message": f"Roxy API 已连接但服务异常（HTTP {status_code}）：{base}；请检查 RoxyBrowser 状态",
+            }
+        if status_code in (404, 405):
+            # 不同 Roxy 版本的只读列表路径可能不同；服务已响应时继续让配置的
+            # create/open 路径做最终兼容性判断。
+            return {
+                "ok": True,
+                "reachable": True,
+                "reason": "endpoint_mismatch",
+                "status_code": status_code,
+                "elapsed_ms": elapsed_ms,
+                "message": f"Roxy API 已响应 HTTP {status_code}；只读探测路径不可用，将继续使用配置的创建/打开接口",
+            }
+        return {
+            "ok": True,
+            "reachable": True,
+            "reason": "ok",
+            "status_code": status_code,
+            "elapsed_ms": elapsed_ms,
+            "message": f"Roxy API 可用：HTTP {status_code}",
+        }
 
     @staticmethod
     def _is_retryable_error(exc: Exception) -> bool:
