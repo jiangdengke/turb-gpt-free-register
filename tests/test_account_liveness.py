@@ -121,6 +121,36 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertEqual(callback.call_count, 2)
         fetch.assert_called_once_with(session)
 
+    def test_email_otp_completes_totp_mfa_before_session_fetch(self):
+        session = _DummyBrowserSession(proxy="")
+        challenge = {
+            "continue_url": "https://auth.openai.com/mfa-challenge/factor-1",
+            "page": {
+                "type": "mfa_challenge",
+                "payload": {"factor_id": "factor-1"},
+            },
+        }
+        with patch.object(liveness, "_validate_with_retry", return_value=challenge), \
+             patch.object(liveness, "_account_totp_secret", return_value="totp-secret"), \
+             patch.object(liveness, "_account_totp_code", return_value="123456"), \
+             patch.object(liveness, "_mfa_issue_challenge") as issue, \
+             patch.object(liveness, "_mfa_verify", return_value={
+                 "continue_url": "https://auth.openai.com/authorize/continue?state=ok",
+             }) as verify, \
+             patch.object(liveness, "_follow_continue_and_fetch", return_value={
+                 "accessToken": "fresh-token",
+             }) as follow:
+            result = liveness._login_via_email_otp(session, "user@example.com", 1.0)
+
+        self.assertEqual(result["accessToken"], "fresh-token")
+        issue.assert_called_once_with(session, "factor-1")
+        verify.assert_called_once_with(session, "factor-1", "123456")
+        follow.assert_called_once_with(
+            session,
+            "https://auth.openai.com/authorize/continue?state=ok",
+            referer="https://auth.openai.com/mfa-challenge/factor-1",
+        )
+
     def test_fingerprint_identity_is_pinned_when_session_is_recreated_in_one_attempt(self):
         state = {}
         first = MagicMock()
