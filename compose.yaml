@@ -1,0 +1,64 @@
+name: turb-gpt-free-register
+
+services:
+  web:
+    image: ${TURB_IMAGE:-turb-gpt-free-register:latest}
+    pull_policy: never
+    container_name: turb-gpt-free-register
+    network_mode: host
+    user: "${PUID:-1000}:${PGID:-1000}"
+    command:
+      - gunicorn
+      - --worker-class
+      - gthread
+      - --workers
+      - "1"
+      - --threads
+      - "16"
+      - --bind
+      - "${TURB_BIND_ADDRESS:-127.0.0.1}:${TURB_PORT:-5000}"
+      - --timeout
+      - "300"
+      - --graceful-timeout
+      - "120"
+      - --access-logfile
+      - "-"
+      - --error-logfile
+      - "-"
+      - webui.app:create_app()
+    environment:
+      TURB_DATA_DIR: /data
+      PYTHONUNBUFFERED: "1"
+      PYTHONDONTWRITEBYTECODE: "1"
+      NODE_EXECUTABLE: /usr/bin/node
+      HOME: /data/home
+      XDG_CACHE_HOME: /data/cache
+      TZ: ${TZ:-Asia/Shanghai}
+    volumes:
+      - type: bind
+        source: ${TURB_DATA_PATH:-./docker-data}
+        target: /data
+    restart: unless-stopped
+    stop_grace_period: 2m
+    pids_limit: 512
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    tmpfs:
+      - /tmp:size=256m,mode=1777
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1', ${TURB_PORT:-5000}), 5); s.close()"
+      interval: 30s
+      timeout: 8s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

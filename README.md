@@ -583,6 +583,58 @@ CPA_MANAGEMENT_KEY = "你的CPA管理密钥"
 
 ## 使用方式
 
+## Docker Compose 部署（Linux）
+
+Docker 镜像只包含程序代码，业务配置和运行数据统一保存在宿主机 `docker-data/`。容器使用单个 Gunicorn worker，避免 SQLite、内存任务队列和后台线程被多副本重复执行。
+
+> Compose 使用 Linux host network，并默认只监听 `127.0.0.1:5000`。这样 `.env` 中现有的 `127.0.0.1` 服务地址（例如本机代理或 `chatgpt2api`）无需改写。不要扩容为多个副本。
+
+首次构建：
+
+```bash
+cp compose.env.example compose.env
+sed -i "s/^PUID=.*/PUID=$(id -u)/; s/^PGID=.*/PGID=$(id -g)/" compose.env
+mkdir -p docker-data
+chmod 700 docker-data
+
+VCS_REF=$(git rev-parse --short HEAD) \
+  docker compose --env-file compose.env -f compose.yaml -f compose.build.yaml build
+docker compose --env-file compose.env -f compose.yaml up -d
+docker compose --env-file compose.env -f compose.yaml ps
+```
+
+查看日志和停止服务：
+
+```bash
+docker compose --env-file compose.env -f compose.yaml logs -f web
+docker compose --env-file compose.env -f compose.yaml down
+```
+
+持久目录包含 `.env`、`turb.sqlite3`、Codex 凭证目录、账号迁移文件和运行日志。容器内仍通过项目根目录的兼容软链接访问这些数据。`compose.env` 只保存镜像、端口、UID/GID 等 Compose 参数，不应写业务密钥。
+
+### 从源码部署迁移
+
+必须先停止源码进程，避免两个进程同时写入 SQLite。建议让 Compose 目录位于旧源码目录之外，便于验证后删除旧源码：
+
+```bash
+old=/path/to/turb-gpt-free-register
+deploy=/path/to/turb-gpt-free-register-compose
+
+cd "$old"
+./webui.sh stop
+mkdir -p "$deploy"
+cp compose.yaml compose.env "$deploy/"
+./scripts/migrate-to-docker-data.sh "$old" "$deploy/docker-data"
+
+cd "$deploy"
+docker compose --env-file compose.env -f compose.yaml up -d
+docker compose --env-file compose.env -f compose.yaml ps
+```
+
+迁移脚本使用 SQLite backup API 复制数据库并执行 `PRAGMA integrity_check`，同时复制 `.env`、日志、Codex 目录和旧版迁移输入。确认容器健康、账号数量和关键配置正确后，再备份并删除旧源码目录。
+
+升级时，在临时源码目录构建相同镜像标签或新标签，然后回到 Compose 目录执行 `docker compose up -d`。回滚时停止 Compose、恢复迁移前的数据快照，并重新启动旧服务；不要让源码进程和容器同时连接同一个数据库。
+
 ## WebUI 推荐方式
 
 推荐使用项目根目录单脚本后台管理：

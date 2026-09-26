@@ -85,6 +85,8 @@ Thumbs.db
 .env
 .env.*
 !.env.example
+compose.env
+docker-data/
 webui.log
 webui.pid
 logs/

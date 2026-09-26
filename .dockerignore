@@ -1,0 +1,19 @@
+# Use an allow-list so credentials and runtime data never enter image layers.
+**
+
+!.dockerignore
+!Dockerfile
+!requirements.txt
+!main.py
+!web.py
+
+!config/
+!config/**
+!core/
+!core/**
+!webui/
+!webui/**
+!sentinel/
+!sentinel/**
+!docker/
+!docker/**
