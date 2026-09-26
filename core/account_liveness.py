@@ -41,6 +41,8 @@ _RETRYABLE_NETWORK_HINTS = (
     "403", "429", "502", "503", "504",
     "proxy", "socks", "timeout", "timed out",
     "connection", "closed", "reset",
+    "ssl", "tls", "wrong_version_number", "curl: (35)", "curl: (28)",
+    "failed to perform",
 )
 
 _SESSION_FINGERPRINT_KEYS = {

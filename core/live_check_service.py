@@ -9,7 +9,11 @@ from datetime import datetime
 from pathlib import Path
 
 from core import db
-from core.account_liveness import check_account_liveness, log_path
+from core.account_liveness import (
+    check_account_liveness,
+    log_path,
+    _is_retryable_network_error,
+)
 from core.chatgpt_plan import _mask_proxy, open_plan_check_proxy, resolve_plan_check_route
 
 logger = logging.getLogger(__name__)
@@ -86,13 +90,14 @@ def _run_live_check(*, account_id: int, email: str, proxy: str | None, trigger: 
         if (
             not result.get("ok")
             and result.get("status") == "failed"
-            and "403" in err_text
             and selected_proxy
-            and str(route.get("network_route") or "") == "proxy"
+            and str(route.get("network_route") or "") in {"proxy", "proxy_chain"}
+            and _is_retryable_network_error(RuntimeError(err_text))
         ):
             _append_log(
                 email,
-                "[查活] 代理路线完整会话收到 403，启动独立直连会话兜底一次（不复用代理画像/Cookie/会话ID）",
+                "[查活] 代理路线网络失败，启动独立直连会话兜底一次 "
+                f"（不复用代理画像/Cookie/会话ID）：{err_text[:180]}",
             )
             # BrowserSession 约定：None=从代理池抽取，""=明确直连。
             # 出口发生变化时必须重新按真实出口探测画像，不能把代理的 JP/VN

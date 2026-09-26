@@ -293,5 +293,43 @@ class AccountLivenessTests(unittest.TestCase):
         self.assertTrue(slot.released)
 
 
+    def test_tls_transport_error_is_retryable_for_direct_fallback(self):
+        self.assertTrue(
+            liveness._is_retryable_network_error(
+                RuntimeError("SSLError: curl: (35) TLS connect error: WRONG_VERSION_NUMBER")
+            )
+        )
+
+    def test_service_tls_fallback_really_uses_direct_connection(self):
+        slot = _DummyQueueSlot()
+        failed = {
+            "ok": False,
+            "status": "failed",
+            "error": "SSLError: curl: (35) TLS connect error: WRONG_VERSION_NUMBER",
+        }
+        success = {"ok": True, "status": "live", "access_token": "new-token"}
+        with patch.object(live_service, "_QUEUE_SLOTS", slot), \
+             patch.object(live_service.db, "mark_account_live_check_running", return_value=True), \
+             patch.object(live_service.db, "get_account", return_value={"email_source": "generic_api"}), \
+             patch.object(live_service.db, "update_account_liveness"), \
+             patch.object(live_service, "_append_log"), \
+             patch.object(live_service, "resolve_plan_check_route", return_value={
+                 "proxy": "http://proxy.example:3000",
+                 "network_route": "proxy",
+                 "proxy_mode": "proxy",
+             }), \
+             patch.object(live_service, "check_account_liveness", side_effect=[failed, success]) as check:
+            result = live_service._run_live_check(
+                account_id=3,
+                email="user@example.com",
+                proxy=None,
+                trigger="manual",
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(check.call_args_list[0].kwargs["proxy"], "http://proxy.example:3000")
+        self.assertEqual(check.call_args_list[1].kwargs["proxy"], "")
+        self.assertTrue(slot.released)
+
 if __name__ == "__main__":
     unittest.main()
