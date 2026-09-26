@@ -520,7 +520,8 @@ def setup_2fa(
     email: str,
     otp_code: str | None = None,
     access_token: str | None = None,
-) -> str:
+    return_access_token: bool = False,
+) -> str | tuple[str, str]:
     """
     完整的 2FA 设置流程。
     会触发再发一份邮箱验证码：
@@ -533,7 +534,9 @@ def setup_2fa(
         otp_code: 邮箱验证码（None 则按上述策略获取）
 
     Returns:
-        TOTP secret（Base32 字符串），可直接用于 pyotp.TOTP() 生成 6 位动态码
+        TOTP secret（Base32 字符串，可直接用于 pyotp.TOTP()）。当
+        ``return_access_token=True`` 时返回 ``(secret, final_access_token)``，
+        因为重认证会刷新 ChatGPT Web session token。
     """
     # 用模块属性读，支持 WebUI 热加载
     from config import email as _email_cfg
@@ -649,7 +652,7 @@ def setup_2fa(
     logger.info("=" * 60)
     logger.info(f"✅ 2FA 设置完成! Secret: {secret[:4]}...{secret[-4:]}")
     logger.info("=" * 60)
-    return secret
+    return (secret, new_token) if return_access_token else secret
 
 
 def save_account_data(
@@ -764,27 +767,52 @@ def save_account_data(
             auto_plan_check = False
     if not auto_plan_check:
         logger.info(f"[Plan] 注册后自动套餐查询已跳过: id={row_id}, email={email}")
-        return row_id
-    # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
-    # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
-    try:
-        from core.plan_check_service import enqueue_account_plan_check
+    else:
+        # session 中的 account.planType 不能说明 Plus 试用资格。账号落库后只负责
+        # 入队，由专用线程池异步查询并回写，避免占用注册工作线程。
+        try:
+            from core.plan_check_service import enqueue_account_plan_check
 
-        queued = enqueue_account_plan_check(
+            queued = enqueue_account_plan_check(
+                account_id=row_id,
+                email=email,
+                access_token=access_token,
+                trigger="registration_auto",
+            )
+            if queued.get("accepted"):
+                logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
+            elif queued.get("busy"):
+                logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
+            else:
+                logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+        except Exception as exc:
+            logger.warning(
+                f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
+                f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
+            )
+
+    # The outbox keeps the local registration transaction independent from the
+    # loopback Account Service. It is disabled by default and never logs tokens.
+    try:
+        from core.chatgpt2api_import_service import enqueue_registered_account
+
+        pool_result = enqueue_registered_account(
             account_id=row_id,
             email=email,
             access_token=access_token,
-            trigger="registration_auto",
+            session_info=extra,
+            proxy=proxy_used,
         )
-        if queued.get("accepted"):
-            logger.info(f"[Plan] 注册后自动查询已入队: id={row_id}, email={email}")
-        elif queued.get("busy"):
-            logger.info(f"[Plan] 账号已有套餐查询，注册流程不重复入队: id={row_id}, email={email}")
-        else:
-            logger.warning(f"[Plan] 注册后自动查询入队失败（不影响注册结果）: {email}, {queued.get('error')}")
+        if pool_result.get("status") not in {"skipped", "success"}:
+            logger.info(
+                "[chatgpt2api] Web account import queued: account_id=%s status=%s",
+                row_id,
+                pool_result.get("status"),
+            )
     except Exception as exc:
         logger.warning(
-            f"[Plan] 注册后自动查询入队异常（不影响注册结果）: "
-            f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
+            "[chatgpt2api] Web account import enqueue failed (registration unaffected): account_id=%s error=%s",
+            row_id,
+            type(exc).__name__,
         )
     return row_id

@@ -17,7 +17,7 @@ import html as html_lib
 from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import quote, unquote, urlparse, urlunparse, parse_qsl, urlencode
+from urllib.parse import quote, unquote, urlparse, urlunparse, parse_qs, parse_qsl, urlencode
 
 import requests
 
@@ -70,6 +70,14 @@ def _redact_proxy_url(proxy_url: str) -> str:
         return f"{parsed.scheme}://{auth}{host}{port}"
     except Exception:
         return "configured-proxy"
+
+
+def _normalize_generic_api_proxy(proxy_url: str) -> str:
+    """把显式 direct/none 等值转换为无代理，便于服务器环境关闭本地代理。"""
+    raw = str(proxy_url or "").strip()
+    if raw.lower() in {"direct", "none", "off", "disabled", "-"}:
+        return ""
+    return raw
 
 
 def _new_http_session(proxy_url: str = "") -> requests.Session:
@@ -126,6 +134,38 @@ def _public_inbox_page_api_url(code_url: str) -> str | None:
     if not latest_url:
         return None
     return latest_url.rsplit("/latest-code", 1)[0]
+
+
+def _mida_messages_api_url(code_url: str) -> str | None:
+    """把 MIDA/icloud 分享页转换成 ``/api/messages`` JSON 接口。"""
+    try:
+        parsed = urlparse(str(code_url or "").strip())
+    except Exception:
+        return None
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return None
+
+    path = (parsed.path or "").rstrip("/")
+    alias_email = ""
+    token = ""
+    if path.lower() == "/api/messages":
+        query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+        alias_email = unquote(str(query.get("alias_email") or "")).strip()
+        token = str(query.get("token") or "").strip()
+    elif path.lower().startswith("/messages/"):
+        alias_email = unquote(path[len("/messages/"):]).strip()
+        token = str(parse_qs(parsed.query).get("token", [""])[0] or "").strip()
+    else:
+        return None
+
+    if not alias_email or not token or "/" in alias_email:
+        return None
+    origin = urlunparse((parsed.scheme, parsed.netloc, "", "", "", "")).rstrip("/")
+    return f"{origin}/api/messages?{urlencode({
+        'alias_email': alias_email,
+        'token': token,
+        'range': 'latest',
+    })}"
 
 
 def _fetch_public_inbox_page_otp(
@@ -210,6 +250,79 @@ def _fetch_public_inbox_page_otp(
             return code, {
                 "source": "public_inbox_page",
                 "mail_id": msg_id,
+                "received_at": received_at,
+                "msg_ts": msg_ts,
+                "subject": subject,
+                "from": item.get("fromAddress") or item.get("sender"),
+            }
+    return None
+
+
+def _mida_message_timestamp(item: dict) -> float | None:
+    """返回 MIDA 邮件多个时间字段中的最新时间，避免 receivedAt 落后于 createdAt。"""
+    timestamps = [
+        _parse_generic_api_ts(item.get(field))
+        for field in ("receivedAt", "createdAt", "updatedAt")
+    ]
+    parsed = [value for value in timestamps if value is not None]
+    return max(parsed, default=None)
+
+
+def _fetch_mida_messages_api_otp(
+    session: requests.Session,
+    api_url: str,
+    email: str,
+    headers: dict,
+    after_ts: float | None = None,
+) -> tuple[str, dict] | None:
+    """从 MIDA/icloud 分享 API 的 ``data.emails`` 中读取最新验证码。"""
+    resp = session.get(
+        api_url,
+        headers={**headers, "Accept": "application/json"},
+        timeout=20,
+        verify=False,
+    )
+    if resp.status_code != 200:
+        logger.debug("[GenericAPI] MIDA messages API HTTP %s: %s", resp.status_code, (resp.text or "")[:160])
+        return None
+    try:
+        payload = resp.json()
+    except Exception:
+        return None
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, dict):
+        return None
+
+    actual_email = str(data.get("aliasEmail") or "").strip()
+    if actual_email and actual_email.lower() != email.lower():
+        raise GenericApiMailError(
+            f"MIDA 分享链接邮箱不匹配: expected={email}, actual={actual_email}"
+        )
+
+    items = [item for item in (data.get("emails") or []) if isinstance(item, dict)]
+    items.sort(key=lambda item: _mida_message_timestamp(item) or 0, reverse=True)
+    for item in items:
+        received_at = item.get("receivedAt") or item.get("createdAt") or item.get("updatedAt")
+        msg_ts = _mida_message_timestamp(item)
+        if after_ts and msg_ts and msg_ts + 2 < after_ts:
+            continue
+
+        raw_code = item.get("verificationCode") or item.get("verification_code")
+        match = _CODE_REGEX.search(str(raw_code or ""))
+        code = match.group(1) if match else None
+        subject = str(item.get("subject") or "")
+        body = "\n".join([
+            str(item.get("textContent") or item.get("textBody") or ""),
+            str(item.get("htmlContent") or item.get("htmlBody") or ""),
+        ])
+        if not code:
+            code = _extract_yangyang_openai_code(subject, body) or _extract_code(
+                "\n".join([subject, body])
+            )
+        if code:
+            return code, {
+                "source": "mida_messages_api",
+                "mail_id": item.get("id"),
                 "received_at": received_at,
                 "msg_ts": msg_ts,
                 "subject": subject,
@@ -707,6 +820,7 @@ def _fetch_poll_payload(
     after_ts: float | None,
     is_yangyang: bool,
     public_inbox_api_url: str | None,
+    mida_messages_api_url: str | None,
 ):
     """执行单次取码请求，网络路由由调用方指定。"""
     session = _new_http_session(proxy_url)
@@ -720,8 +834,14 @@ def _fetch_poll_payload(
         )
         if public_inbox_api_url else None
     )
-    page_result = yy_result or public_result
-    if page_result or is_yangyang or public_inbox_api_url:
+    mida_result = (
+        _fetch_mida_messages_api_otp(
+            session, mida_messages_api_url, email, headers, after_ts=after_ts,
+        )
+        if mida_messages_api_url else None
+    )
+    page_result = yy_result or public_result or mida_result
+    if page_result or is_yangyang or public_inbox_api_url or mida_messages_api_url:
         return page_result, yy_result, None, ""
     resp = session.get(poll_url, headers=headers, timeout=20, verify=False)
     return None, None, resp, resp.text or ""
@@ -764,16 +884,24 @@ def fetch_latest_otp(
     )
     is_yangyang = _parse_yangyang_code_url(account.code_url) is not None
     public_inbox_api_url = _public_inbox_page_api_url(account.code_url)
+    mida_messages_api_url = _mida_messages_api_url(account.code_url)
     if public_inbox_api_url:
         logger.info(
             "[GenericAPI] 已识别公开收件页面，使用页面 inbox API: host=%s email=%s",
             urlparse(public_inbox_api_url).netloc,
             email,
         )
+    elif mida_messages_api_url:
+        logger.info(
+            "[GenericAPI] 已识别 MIDA 分享页面，使用 messages API: host=%s email=%s",
+            urlparse(mida_messages_api_url).netloc,
+            email,
+        )
 
-    selected_proxy = str(getattr(_email_cfg, "GENERIC_API_PROXY", "") or "").strip()
-    # 兼容旧版配置：未设置通用 API 专用代理时沿用代理池；专用代理优先。
-    if not selected_proxy:
+    configured_proxy = str(getattr(_email_cfg, "GENERIC_API_PROXY", "") or "").strip()
+    selected_proxy = _normalize_generic_api_proxy(configured_proxy)
+    # 兼容旧版配置：只有真正未配置时才沿用代理池；显式 direct/none 不再回退。
+    if not configured_proxy:
         selected_proxy = str(_proxy_cfg.pick_proxy() or "").strip()
     routes: list[tuple[str, str]] = []
     if selected_proxy:
@@ -790,7 +918,7 @@ def fetch_latest_otp(
         attempt += 1
         try:
             # 不修改 yangyang 的路径型 URL；其列表接口本身按邮件 ID 返回数据。
-            base_poll_url = public_inbox_api_url or account.code_url
+            base_poll_url = public_inbox_api_url or mida_messages_api_url or account.code_url
             poll_url = base_poll_url if is_yangyang else _cache_busted_url(base_poll_url, attempt)
             route_error: Exception | None = None
             page_result = yy_result = resp = None
@@ -807,6 +935,7 @@ def fetch_latest_otp(
                         after_ts=after_ts,
                         is_yangyang=is_yangyang,
                         public_inbox_api_url=public_inbox_api_url,
+                        mida_messages_api_url=mida_messages_api_url,
                     )
                     route_error = None
                     break
@@ -852,11 +981,13 @@ def fetch_latest_otp(
                 resp = None
                 text = ""
             else:
-                if is_yangyang or public_inbox_api_url:
+                if is_yangyang or public_inbox_api_url or mida_messages_api_url:
                     last_error = (
                         "yangyang 列表中尚未出现 after_ts 之后的新验证码邮件"
                         if is_yangyang else
                         "公开收件页面中尚未出现 after_ts 之后的新验证码邮件"
+                        if public_inbox_api_url else
+                        "MIDA messages API 中尚未出现 after_ts 之后的新验证码邮件"
                     )
                     resp = None
                     text = ""

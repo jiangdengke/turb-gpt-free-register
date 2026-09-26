@@ -124,7 +124,37 @@ def _run_twofa(
             f"source={proxy_source} device_id={session.device_id}",
         )
         _append_log(email, f"[2FA] 指纹摘要：{session.fingerprint_summary_text()}")
-        secret = setup_2fa(session, email, access_token=access_token)
+        setup_result = setup_2fa(
+            session,
+            email,
+            access_token=access_token,
+            return_access_token=True,
+        )
+        if isinstance(setup_result, tuple):
+            secret, final_access_token = setup_result
+            if final_access_token:
+                db.update_account_access_token(account_id, final_access_token)
+                try:
+                    from config import chatgpt2api as _chatgpt2api_cfg
+                    if (
+                        bool(getattr(_chatgpt2api_cfg, "ENABLE_CHATGPT2API_IMPORT", False))
+                        and str(getattr(_chatgpt2api_cfg, "CHATGPT2API_CREDENTIAL_MODE", "") or "").strip().lower() == "session"
+                    ):
+                        from core.chatgpt2api_import_service import enqueue_registered_account
+                        enqueue_registered_account(
+                            account_id=account_id,
+                            email=email,
+                            access_token=final_access_token,
+                            proxy=proxy,
+                        )
+                except Exception as import_exc:
+                    logger.warning(
+                        "[chatgpt2api] 2FA token import update was not queued: account_id=%s error=%s",
+                        account_id,
+                        type(import_exc).__name__,
+                    )
+        else:
+            secret = setup_result
         db.update_account_totp_secret(
             account_id,
             {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},

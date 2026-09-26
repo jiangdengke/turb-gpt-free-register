@@ -664,6 +664,37 @@ EDITABLE_FIELDS = [
         "key": "SUB2API_PROXY_KEY", "file": "sub2api.py", "type": "str", "group": "Codex",
         "label": "Agent sub2 代理键", "help": "可选；写入 account.proxy_key，并在 proxies 为空时初始化 proxies[0].proxy_key",
     },
+    # ---- chatgpt2api Web account pool ----
+    {
+        "key": "ENABLE_CHATGPT2API_IMPORT", "file": "chatgpt2api.py", "type": "bool", "group": "账号池同步",
+        "label": "自动同步 chatgpt2api Web 账号", "help": "注册账号落库后，通过本机 loopback Account Service 自动导入；默认关闭",
+    },
+    {
+        "key": "CHATGPT2API_CREDENTIAL_MODE", "file": "chatgpt2api.py", "type": "str", "group": "账号池同步",
+        "label": "账号池凭证模式", "help": "session_json=导入 ChatGPT Web Session JSON（推荐）；oauth_pkce=标准 OAuth PKCE 并保存 RT",
+        "choices": [
+            {"value": "session_json", "label": "Session JSON（推荐）"},
+            {"value": "oauth_pkce", "label": "OAuth PKCE（高级）"},
+        ],
+    },
+    {
+        "key": "CHATGPT2API_BASE_URL", "file": "chatgpt2api.py", "type": "str", "group": "账号池同步",
+        "label": "chatgpt2api 本机地址", "help": "默认 http://127.0.0.1:3001；同机 loopback 不经过公网反向代理",
+    },
+    {
+        "key": "CHATGPT2API_MANAGEMENT_KEY", "file": "chatgpt2api.py", "type": "str", "group": "账号池同步",
+        "label": "chatgpt2api 管理密钥", "help": "只保存在 .env，用于 loopback Account Service Bearer 鉴权；不会写入日志或请求结果",
+        "storage": "env", "secret": True,
+    },
+    {
+        "key": "CHATGPT2API_REQUEST_TIMEOUT", "file": "chatgpt2api.py", "type": "int", "group": "账号池同步",
+        "label": "账号池请求超时(秒)", "help": "Account Service 导入和同步请求超时",
+    },
+    {
+        "key": "CHATGPT2API_RETRY_DELAY", "file": "chatgpt2api.py", "type": "int", "group": "账号池同步",
+        "label": "账号池重试间隔(秒)", "help": "导入失败后的指数退避基准；凭证保留在本地 outbox，不写入日志",
+    },
+
     # ---- 接码平台 ----
     # ---- Codex：基础 / CPA / sub2api 配置 ----
     {

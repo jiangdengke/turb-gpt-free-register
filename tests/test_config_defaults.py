@@ -3,6 +3,7 @@ import os
 import importlib
 import unittest
 from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 from config import env_loader
@@ -86,7 +87,15 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
         )
         self.assertTrue(config_editor._coerce_raw_value("", True, "bool"))
 
-    def test_webui_exposes_browser_data_saver_settings(self):
+    def test_chatgpt2api_defaults_to_session_json_mode(self):
+        source = Path("config/chatgpt2api.py").read_text(encoding="utf-8")
+        fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
+        self.assertIn('CHATGPT2API_CREDENTIAL_MODE: str = "session_json"', source)
+        self.assertEqual(
+            fields["CHATGPT2API_CREDENTIAL_MODE"]["choices"][0]["value"],
+            "session_json",
+        )
+
         fields = {field["key"]: field for field in config_editor.EDITABLE_FIELDS}
         self.assertEqual(fields["BROWSER_DATA_SAVER_MODE"]["type"], "bool")
         self.assertEqual(fields["BROWSER_DATA_SAVER_BLOCKED_RESOURCE_TYPES"]["type"], "list_str_multiline")

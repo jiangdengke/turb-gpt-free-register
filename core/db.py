@@ -8,6 +8,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+import time
 import uuid
 from contextlib import closing
 from datetime import datetime
@@ -151,6 +152,25 @@ def _ensure_sqlite() -> None:
                 created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT '',
                 payload TEXT NOT NULL
             );
+            CREATE TABLE IF NOT EXISTS account_pool_imports (
+                account_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL DEFAULT '',
+                credential_mode TEXT NOT NULL DEFAULT 'session',
+                status TEXT NOT NULL DEFAULT 'pending',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                management_id TEXT NOT NULL DEFAULT '',
+                last_error TEXT NOT NULL DEFAULT '',
+                next_attempt_at REAL NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS account_pool_import_credentials (
+                account_id INTEGER PRIMARY KEY,
+                email TEXT NOT NULL DEFAULT '',
+                payload TEXT NOT NULL,
+                created_at TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL DEFAULT ''
+            );
             CREATE TABLE IF NOT EXISTS storage_meta (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -167,6 +187,8 @@ def _ensure_sqlite() -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_accounts_created ON codex_accounts(created_at DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_agent_accounts_email ON codex_agent_accounts(email COLLATE NOCASE)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_codex_agent_accounts_updated ON codex_agent_accounts(updated_at DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_account_pool_imports_due ON account_pool_imports(status, next_attempt_at, updated_at)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_account_pool_imports_email ON account_pool_imports(email COLLATE NOCASE)")
         migration_done = conn.execute(
             "SELECT 1 FROM storage_meta WHERE key='legacy_import_completed' LIMIT 1"
         ).fetchone()
@@ -1069,6 +1091,30 @@ def update_account_codex_status(email: str, codex_status: str, codex_error: str 
         return True
 
 
+def update_account_access_token(
+    account_id: int,
+    access_token: str,
+    expires_at: str | None = None,
+) -> bool:
+    """Replace a local Web session token after a re-authentication flow."""
+    token = str(access_token or "").strip()
+    if not token:
+        return False
+    with _LOCK:
+        accounts = _load_accounts()
+        row = next((r for r in accounts if int(r.get("id") or 0) == int(account_id)), None)
+        if row is None:
+            return False
+        row["access_token"] = token
+        if expires_at is not None:
+            row["expires_at"] = expires_at
+        row["token_expired"] = False
+        row["updated_at"] = _now()
+        row["copy_line"] = _account_line(row)
+        _save_accounts(accounts)
+        return True
+
+
 def claim_account_codex_agent(acc_id: int, trigger: str = "manual") -> bool:
     """原子占用账号 Codex Agent Token 生成任务；已有未超时任务时返回 False。"""
     with _LOCK:
@@ -1757,6 +1803,176 @@ def get_account_by_email(email: str) -> dict | None:
     with _LOCK:
         row = _find_by_email(_load_accounts(), email)
         return _decorate_account(row) if row else None
+
+
+def enqueue_account_pool_import(account_id: int, email: str, credential_mode: str = "session") -> dict:
+    """Create or reopen an import outbox row without storing credentials in it."""
+    _ensure_sqlite()
+    now = _now()
+    mode = str(credential_mode or "session").strip().lower() or "session"
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        current = conn.execute(
+            "SELECT * FROM account_pool_imports WHERE account_id=?",
+            (int(account_id),),
+        ).fetchone()
+        if current and str(current["status"] or "").lower() == "running":
+            conn.execute(
+                "UPDATE account_pool_imports SET email=?, credential_mode=?, status='pending', attempts=0, "
+                "last_error='', next_attempt_at=0, updated_at=? WHERE account_id=?",
+                (str(email or ""), mode, now, int(account_id)),
+            )
+            conn.commit()
+            row = conn.execute(
+                "SELECT * FROM account_pool_imports WHERE account_id=?",
+                (int(account_id),),
+            ).fetchone()
+            return dict(row) if row else {}
+        conn.execute(
+            "INSERT INTO account_pool_imports(account_id,email,credential_mode,status,attempts,management_id,last_error,next_attempt_at,created_at,updated_at) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?) "
+            "ON CONFLICT(account_id) DO UPDATE SET email=excluded.email, credential_mode=excluded.credential_mode, "
+            "status='pending', attempts=0, management_id=account_pool_imports.management_id, last_error='', next_attempt_at=0, updated_at=excluded.updated_at",
+            (int(account_id), str(email or ""), mode, "pending", 0, "", "", 0.0, now, now),
+        )
+        conn.commit()
+        row = conn.execute(
+            "SELECT * FROM account_pool_imports WHERE account_id=?",
+            (int(account_id),),
+        ).fetchone()
+    return dict(row) if row else {}
+
+
+def clear_account_pool_import_management_id(account_id: int) -> bool:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        cur = conn.execute(
+            "UPDATE account_pool_imports SET management_id='', updated_at=? WHERE account_id=?",
+            (_now(), int(account_id)),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def recover_account_pool_imports() -> int:
+    """Requeue work left in running state by a stopped WebUI process."""
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        cur = conn.execute(
+            "UPDATE account_pool_imports SET status='pending', next_attempt_at=0, updated_at=? "
+            "WHERE status='running'",
+            (_now(),),
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+
+
+def save_account_pool_import_credentials(account_id: int, email: str, payload: dict) -> None:
+    """Persist import credentials locally for retry; never include them in outbox logs."""
+    if not isinstance(payload, dict) or not str(payload.get("access_token") or "").strip():
+        raise ValueError("account pool import credentials require access_token")
+    _ensure_sqlite()
+    now = _now()
+    serialized = json.dumps(dict(payload), ensure_ascii=False)
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        conn.execute(
+            "INSERT INTO account_pool_import_credentials(account_id,email,payload,created_at,updated_at) VALUES(?,?,?,?,?) "
+            "ON CONFLICT(account_id) DO UPDATE SET email=excluded.email, payload=excluded.payload, updated_at=excluded.updated_at",
+            (int(account_id), str(email or ""), serialized, now, now),
+        )
+        conn.commit()
+
+
+def get_account_pool_import_credentials(account_id: int) -> dict:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        row = conn.execute(
+            "SELECT payload FROM account_pool_import_credentials WHERE account_id=?",
+            (int(account_id),),
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        payload = json.loads(row["payload"])
+    except Exception:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def list_due_account_pool_imports(limit: int = 20) -> list[dict]:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        rows = conn.execute(
+            "SELECT * FROM account_pool_imports WHERE status IN ('pending','failed') AND next_attempt_at<=? "
+            "ORDER BY next_attempt_at ASC, updated_at ASC LIMIT ?",
+            (time.time(), max(1, int(limit))),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def claim_account_pool_import(account_id: int) -> bool:
+    _ensure_sqlite()
+    now = _now()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        cur = conn.execute(
+            "UPDATE account_pool_imports SET status='running', attempts=attempts+1, updated_at=? "
+            "WHERE account_id=? AND status IN ('pending','failed') AND next_attempt_at<=?",
+            (now, int(account_id), time.time()),
+        )
+        conn.commit()
+        return cur.rowcount == 1
+
+
+def finish_account_pool_import(
+    account_id: int,
+    *,
+    status: str,
+    management_id: str | None = None,
+    error: str | None = None,
+    next_attempt_at: float = 0.0,
+) -> bool:
+    """Record only sanitized outbox state and the target management identity."""
+    normalized = str(status or "failed").strip().lower()
+    if normalized not in {"pending", "running", "success", "failed"}:
+        raise ValueError(f"invalid account pool import status: {status!r}")
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        cur = conn.execute(
+            "UPDATE account_pool_imports SET status=?, management_id=COALESCE(NULLIF(?, ''), management_id), "
+            "last_error=?, next_attempt_at=?, updated_at=? WHERE account_id=? AND status='running'",
+            (
+                normalized,
+                str(management_id or ""),
+                str(error or "")[:1000],
+                float(next_attempt_at or 0.0),
+                _now(),
+                int(account_id),
+            ),
+        )
+        if cur.rowcount == 0:
+            # A newer enqueue may have moved the row back to pending while the
+            # remote request was still in flight. Preserve an ID returned by
+            # that older request, but never overwrite the newer pending state.
+            if str(management_id or "").strip():
+                conn.execute(
+                    "UPDATE account_pool_imports SET management_id=?, updated_at=? WHERE account_id=?",
+                    (str(management_id).strip(), _now(), int(account_id)),
+                )
+            conn.commit()
+            return False
+        conn.commit()
+        return True
+
+
+def get_account_pool_import_status(account_id: int) -> dict:
+    _ensure_sqlite()
+    with _LOCK, closing(_sqlite_conn()) as conn:
+        row = conn.execute(
+            "SELECT account_id,email,credential_mode,status,attempts,management_id,last_error,next_attempt_at,created_at,updated_at "
+            "FROM account_pool_imports WHERE account_id=?",
+            (int(account_id),),
+        ).fetchone()
+    return dict(row) if row else {}
+
 
 
 def update_account_note(acc_id: int, note: str) -> bool:

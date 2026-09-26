@@ -16,7 +16,7 @@ from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
-from core.session import BrowserSession
+from core.session import BrowserSession, close_browser_session
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
     follow_authorize,
@@ -25,6 +25,7 @@ from core.openai_auth import (
     validate_email_otp,
     send_email_otp,
     network_preflight,
+    _is_retryable_authorize_error,
     navigate_about_you,
     EmailOtpInvalidError,
     create_account,
@@ -51,6 +52,173 @@ logger = logging.getLogger(__name__)
 
 _FINALIZE_SESSION_MAX_ATTEMPTS = 5
 _FINALIZE_SESSION_BACKOFF_BASE = 2.0
+
+
+def _network_preflight_with_session_rotation(
+    session: BrowserSession,
+    requested_proxy: str | None,
+    *,
+    max_attempts: int | None = None,
+) -> BrowserSession:
+    """预检失败后重建会话，给动态代理机会分配新的出口 IP。
+
+    预检发生在 signin/OTP 之前，重建会话不会丢失已触发的注册状态或烧掉邮箱。
+    ``requested_proxy`` 保留调用方显式指定的代理；None 仍让 BrowserSession 从池中
+    重新抽取代理。
+    """
+    max_attempts = max_attempts if max_attempts is not None else getattr(
+        _protocol_cfg, "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS", 3
+    )
+    max_attempts = max(1, int(max_attempts or 3))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            network_preflight(session)
+            if attempt > 1:
+                logger.info(
+                    "[预检] 新会话链路重试成功 (%s/%s)",
+                    attempt,
+                    max_attempts,
+                )
+            return session
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_authorize_error(exc):
+                raise
+            logger.warning(
+                "[预检] 当前会话重试耗尽（%s/%s）：%s: %s；"
+                "关闭会话并重新分配出口后重试",
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            try:
+                close_browser_session(session)
+            except Exception:
+                logger.debug("[预检] 关闭失败会话时出现异常", exc_info=True)
+            session = BrowserSession(proxy=requested_proxy)
+    raise RuntimeError("网络预检重试耗尽但无异常记录")
+
+
+def _start_chatgpt_auth_with_session_rotation(
+    session: BrowserSession,
+    requested_proxy: str | None,
+    email: str,
+    *,
+    max_attempts: int | None = None,
+) -> tuple[BrowserSession, str]:
+    """执行 OTP 前完整 ChatGPT 链路，并在可重试错误后更换会话。"""
+    max_attempts = max_attempts if max_attempts is not None else getattr(
+        _protocol_cfg, "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS", 3
+    )
+    max_attempts = max(1, int(max_attempts or 3))
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # 这里每轮只尝试当前会话一次；外层负责统一重建会话，避免
+            # preflight 成功但 CSRF 403 时仍卡在同一份 CF 状态里。
+            session = _network_preflight_with_session_rotation(
+                session,
+                requested_proxy,
+                max_attempts=1,
+            )
+            human_delay("navigate")
+
+            if getattr(_protocol_cfg, "CHATGPT_ANON_BOOTSTRAP_ENABLED", True):
+                from core.chatgpt_bootstrap import anonymous_bootstrap
+                anonymous_bootstrap(
+                    session,
+                    strict=bool(getattr(_protocol_cfg, "CHATGPT_BOOTSTRAP_STRICT", False)),
+                )
+                human_delay("navigate")
+
+            # providers 是可选发现接口；get_providers 内部会隔离 403/429。
+            get_providers(session)
+            human_delay("api")
+            csrf_token = get_csrf_token(session)
+            human_delay("api")
+            authorize_url = signin_openai(session, csrf_token, email)
+            human_delay("api")
+            if attempt > 1:
+                logger.info("[认证] 新会话前置链路重试成功 (%s/%s)", attempt, max_attempts)
+            return session, authorize_url
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_authorize_error(exc):
+                raise
+            logger.warning(
+                "[认证] OTP 前链路失败（%s/%s）：%s: %s；"
+                "关闭当前会话并从登录页重新开始",
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            try:
+                close_browser_session(session)
+            except Exception:
+                logger.debug("[认证] 关闭失败会话时出现异常", exc_info=True)
+            session = BrowserSession(proxy=requested_proxy)
+    raise RuntimeError("OTP 前认证链路重试耗尽但无异常记录")
+
+
+def _run_pre_otp_authorization_with_session_rotation(
+    session: BrowserSession,
+    requested_proxy: str | None,
+    email: str,
+) -> BrowserSession:
+    """在 OTP 触发前完成登录页到 authorize 的链路，并支持整链重启。
+
+    ``follow_authorize`` 自身只会在当前 Cookie/会话内重试。若 auth.openai.com
+    仍返回 403，继续复用该会话没有意义；此时 OTP 尚未可靠触发，可以安全关闭
+    会话，从 ChatGPT 登录页重新获取 CSRF、signin 和新的 authorize state。
+    """
+    max_attempts = max(
+        1,
+        int(getattr(_protocol_cfg, "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS", 3) or 3),
+    )
+    for attempt in range(1, max_attempts + 1):
+        try:
+            # 每轮只使用一个会话；当前会话内的预检和 authorize 重试由各自函数负责。
+            session, authorize_url = _start_chatgpt_auth_with_session_rotation(
+                session,
+                requested_proxy,
+                email,
+                max_attempts=1,
+            )
+            follow_authorize(session, authorize_url)
+            if attempt > 1:
+                logger.info(
+                    "[认证] 重建会话后 authorize 成功 (%s/%s)",
+                    attempt,
+                    max_attempts,
+                )
+            return session
+        except Exception as exc:
+            if attempt >= max_attempts or not _is_retryable_authorize_error(exc):
+                raise
+            logger.warning(
+                "[认证] OTP 前 authorize 链路失败（%s/%s）：%s: %s；"
+                "关闭当前会话并从登录页重新开始",
+                attempt,
+                max_attempts,
+                type(exc).__name__,
+                str(exc)[:180],
+            )
+            try:
+                close_browser_session(session)
+            except Exception:
+                logger.debug("[认证] 关闭失败会话时出现异常", exc_info=True)
+            try:
+                session = BrowserSession(proxy=requested_proxy)
+            except Exception as reopen_exc:
+                if attempt >= max_attempts or not _is_retryable_authorize_error(reopen_exc):
+                    raise
+                logger.warning(
+                    "[认证] 重建会话失败（%s/%s）：%s: %s；继续尝试",
+                    attempt,
+                    max_attempts,
+                    type(reopen_exc).__name__,
+                    str(reopen_exc)[:180],
+                )
+    raise RuntimeError("OTP 前 authorize 链路重试耗尽但无异常记录")
 
 
 def configure_logging(verbose: bool = False) -> None:
@@ -270,42 +438,20 @@ def run_registration(
 
     create_acknowledged = False
     try:
-        # 网络预检必须在 signin/follow_authorize 之前完成；预检不带邮箱，不会触发 OTP。
-        network_preflight(session)
-        human_delay("navigate")
-
-        # 根据 2026-07-19 HAR 补齐匿名态 ChatGPT 首屏/模型预热链路。
-        if getattr(_protocol_cfg, "CHATGPT_ANON_BOOTSTRAP_ENABLED", True):
-            from core.chatgpt_bootstrap import anonymous_bootstrap
-            anonymous_bootstrap(
-                session,
-                strict=bool(getattr(_protocol_cfg, "CHATGPT_BOOTSTRAP_STRICT", False)),
-            )
-            human_delay("navigate")
-
-        # ==================== 阶段1: ChatGPT 认证 ====================
-        # 步骤1: 获取 providers
-        providers = get_providers(session)
-        human_delay("api")
-
-        # 步骤2: 获取 CSRF token
-        csrf_token = get_csrf_token(session)
-        human_delay("api")
-
-        # 步骤3: 发起 OAuth signin
-        authorize_url = signin_openai(session, csrf_token, email)
-        human_delay("api")
+        # 网络预检、bootstrap、providers、CSRF、signin、authorize 必须作为一个完整前置链路；
+        # OTP 尚未可靠触发时，任一可重试 403 都可以安全换会话重来。
+        session = _run_pre_otp_authorization_with_session_rotation(
+            session,
+            proxy,
+            email,
+        )
 
         # 记录"OTP 触发"前的时间戳，自动取信箱时只看此后的邮件，
         # 避免取到上次注册留下的旧 OTP。
         otp_after_ts = time.time()
 
         # ==================== 阶段2: OpenAI Auth ====================
-        # 步骤4: 跟随 authorize URL（建立 auth.openai.com 的 cookies）
-        # 由于步骤3已携带 login_hint + screen_hint=login_or_signup，
-        # 重定向链会直接走到 /email-verification 并自动触发 OTP 发送，
-        # 不需要 /create-account/password、register_user、单独 send_email_otp 调用。
-        follow_authorize(session, authorize_url)
+        # 步骤4 已在上面的 OTP 前完整链路中完成，下面直接进入验证码验证阶段。
         human_delay("navigate")
 
         # ==================== 阶段3: 验证码验证 ====================
@@ -458,7 +604,15 @@ def run_registration(
         if _twofa_cfg.ENABLE_2FA:
             # 步骤14-20: 重认证（要再收一次邮箱 OTP）→ enroll TOTP → activate
             try:
-                totp_secret = setup_2fa(session, email)
+                setup_result = setup_2fa(
+                    session,
+                    email,
+                    return_access_token=True,
+                )
+                if isinstance(setup_result, tuple):
+                    totp_secret, access_token = setup_result
+                else:
+                    totp_secret = setup_result
             except Exception as exc:
                 logger.error(f"2FA 设置失败: {exc}")
                 logger.debug("2FA 错误详情:", exc_info=True)
@@ -517,6 +671,25 @@ def run_registration(
 
         logger.info(f"[完成] {email}，账号ID={account_id}，Token={access_token[:16]}...")
 
+        pool_import_result = {"status": "skipped", "ok": False, "message": "disabled"}
+        try:
+            from config import chatgpt2api as _chatgpt2api_cfg
+            if bool(getattr(_chatgpt2api_cfg, "ENABLE_CHATGPT2API_IMPORT", False)):
+                from core.chatgpt2api_import_service import get_import_status
+                pool_import_result = get_import_status(account_id)
+                logger.info(
+                    "[chatgpt2api] Web account import state: account_id=%s status=%s management_id=%s",
+                    account_id,
+                    pool_import_result.get("status"),
+                    pool_import_result.get("management_id") or "-",
+                )
+        except Exception as exc:
+            logger.warning(
+                "[chatgpt2api] Web account import status unavailable: account_id=%s error=%s",
+                account_id,
+                type(exc).__name__,
+            )
+
         # ==================== 阶段9: 后置自动触发 flow ====================
         # 只有走完回调、拿到 token 并保存成功的账号，才会触发 flow。
         # flow 请求不影响账号保存状态，但会记录结果并参与批量统计。
@@ -555,6 +728,7 @@ def run_registration(
         return {"success": task_success, "email": email, "account_id": account_id,
                 "access_token": access_token, "totp_secret": totp_secret,
                 "flow": flow_result, "codex": codex_result,
+                "chatgpt2api": pool_import_result,
                 "error": task_error}
 
     except Exception as e:

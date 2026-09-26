@@ -343,6 +343,11 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_email_changes = db.recover_interrupted_email_changes()
     if recovered_email_changes:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
+    try:
+        from core.chatgpt2api_import_service import start_import_worker
+        start_import_worker()
+    except Exception:
+        logger.exception("启动 chatgpt2api Web 账号导入队列失败")
 
     # ----------------------------------------------------------
     # 页面
@@ -2949,6 +2954,20 @@ def create_app(auth_code: str | None = None) -> Flask:
         except Exception as exc:
             logger.exception("获取 CloudMail 域名失败")
             return jsonify({"ok": False, "error": f"{type(exc).__name__}: {exc}"}), 400
+
+    @app.post("/api/chatgpt2api/test-connection")
+    def api_chatgpt2api_test_connection():
+        """Check the saved Account Service settings without mutating remote accounts."""
+        try:
+            from core.chatgpt2api_import_service import test_connection
+            return jsonify(test_connection())
+        except Exception as exc:
+            logger.exception("chatgpt2api 连接测试失败")
+            return jsonify({
+                "ok": False,
+                "status": "error",
+                "message": f"连接测试失败：{type(exc).__name__}",
+            })
 
     @app.post("/api/config")
     def api_config_set():

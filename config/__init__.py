@@ -17,6 +17,7 @@ config 包的统一入口。
     config.register          注册默认信息（邮箱、密码、名称、生日）
     config.email             Outlook 邮箱账号池 + OTP 轮询
     config.twofa             2FA 开关
+    config.chatgpt2api       chatgpt2api Web 账号池同步
 """
 
 # ---------- 浏览器 / HTTP ----------
@@ -98,6 +99,7 @@ from config.openai_protocol import (
     OPENAI_PROXY_RETRY_MAX_ATTEMPTS,
     OPENAI_PROXY_RETRY_DELAY,
     OPENAI_PREFLIGHT_TIMEOUT,
+    OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS,
 )
 
 # ---------- 代理池 ----------
@@ -185,6 +187,17 @@ from config.twofa import (
     TWOFA_QUEUE_LIMIT,
 )
 
+# ---------- chatgpt2api Web account pool ----------
+from config.chatgpt2api import (
+    ENABLE_CHATGPT2API_IMPORT,
+    CHATGPT2API_BASE_URL,
+    CHATGPT2API_MANAGEMENT_KEY,
+    CHATGPT2API_REQUEST_TIMEOUT,
+    CHATGPT2API_RETRY_DELAY,
+    CHATGPT2API_CREDENTIAL_MODE,
+    CHATGPT2API_SYNC_AFTER_IMPORT,
+)
+
 
 # ---------- 热加载支持 ----------
 # WebUI 改配置后调 reload_all() 即可让所有运行时代码看到新值，无需重启进程。
@@ -209,6 +222,7 @@ _RELOADABLE_SUBMODULES = (
     "config.extract_link",
     "config.sub2api",
     "config.humanize",
+    "config.chatgpt2api",
 )
 
 
@@ -238,9 +252,9 @@ def reload_all() -> list[str]:
 def _refresh_top_level_constants() -> None:
     """把刚 reload 的子模块的常量重新拷一份到 config 包顶层。"""
     import config as _self
-    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger
+    from config import browser, openai_protocol, proxy as _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger, chatgpt2api
     # 简单粗暴：枚举一遍重要常量，覆盖到 _self
-    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger):
+    for src in (browser, openai_protocol, _proxy, register, email, twofa, roxybrowser, cloakbrowser, browser_use, skyvern, codex, extract_link, sub2api, humanize, flow_trigger, chatgpt2api):
         for k in dir(src):
             if k.isupper() or k in ("pick_proxy", "pick_browser_profile", "build_browser_environment", "validate_browser_profile"):
                 setattr(_self, k, getattr(src, k))
@@ -268,6 +282,7 @@ __all__ = [
     "STATSIG_CLIENT_KEY", "STATSIG_SDK_VERSION", "STATSIG_SDK_TYPE", "AB_CLIENT_KEY", "AB_SDK_VERSION",
     "SEND_SENTINEL_ON_EMAIL_OTP_VALIDATE", "CHATGPT_ANON_BOOTSTRAP_ENABLED", "CHATGPT_AUTH_BOOTSTRAP_ENABLED", "CHATGPT_BOOTSTRAP_STRICT",
     "OPENAI_PROXY_RETRY_MAX_ATTEMPTS", "OPENAI_PROXY_RETRY_DELAY", "OPENAI_PREFLIGHT_TIMEOUT",
+    "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS",
     # proxy
     "PROXY_POOL", "PROXY_POOL_UPSTREAM_PROXY", "PLAN_CHECK_PROXY_MODE", "PLAN_CHECK_PROXY", "PLAN_CHECK_UPSTREAM_PROXY",
     "PLAN_CHECK_TIMEOUT", "PLAN_CHECK_MAX_ATTEMPTS", "PLAN_CHECK_RETRY_DELAY",
@@ -293,4 +308,8 @@ __all__ = [
     # twofa
     "ENABLE_2FA", "TWOFA_PROXY_MODE", "TWOFA_REAUTH_MAX_ATTEMPTS", "TWOFA_REAUTH_RETRY_DELAY",
     "TWOFA_WORKERS", "TWOFA_QUEUE_LIMIT",
+    # chatgpt2api
+    "ENABLE_CHATGPT2API_IMPORT", "CHATGPT2API_BASE_URL", "CHATGPT2API_MANAGEMENT_KEY",
+    "CHATGPT2API_REQUEST_TIMEOUT", "CHATGPT2API_RETRY_DELAY", "CHATGPT2API_CREDENTIAL_MODE",
+    "CHATGPT2API_SYNC_AFTER_IMPORT",
 ]

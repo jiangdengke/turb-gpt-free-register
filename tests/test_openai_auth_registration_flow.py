@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import core.openai_auth as openai_auth
+import core.chatgpt_auth as chatgpt_auth
 from core.session import BrowserSession
 
 
@@ -69,6 +70,25 @@ class _ProtocolSession:
 
 
 class OpenAIRegistrationFlowTests(unittest.TestCase):
+    def test_get_providers_403_is_optional_and_resets_circuit(self):
+        class Session:
+            def __init__(self):
+                self.reset_count = 0
+
+            def get_nextauth_headers(self, referer=""):
+                return {"referer": referer}
+
+            def get(self, *_args, **_kwargs):
+                return _Response(status_code=403)
+
+            def reset_circuit_breaker(self):
+                self.reset_count += 1
+
+        session = Session()
+
+        self.assertEqual(chatgpt_auth.get_providers(session), {})
+        self.assertEqual(session.reset_count, 1)
+
     def test_network_preflight_uses_address_bar_navigation_shape(self):
         class Session:
             def __init__(self):

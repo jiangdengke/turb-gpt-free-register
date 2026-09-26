@@ -1094,18 +1094,22 @@ def _complete_mfa_if_required(session: BrowserSession, email: str, result: dict 
     return _mfa_verify(session, factor_id, code)
 
 
-def _follow_login_continue(session: BrowserSession, continue_url: str, state: str) -> str | None:
+def _follow_login_continue(
+    session: BrowserSession,
+    continue_url: str,
+    state: str,
+    callback_matcher=None,
+) -> str | None:
     """
     密码/MFA 成功后的 continue URL 可能直接跳 callback，也可能只把会话推进到
-    Codex consent/workspace 页面。这里只负责跟随重定向并保留 Cookie：
-      - 命中 localhost callback：返回 callback URL
-      - 停在 200 HTML/无 Location：返回 None，后续继续 workspace/select
+    consent 页面。``callback_matcher`` 让标准 Web OAuth 使用 platform callback，
+    同时保持旧 Codex localhost callback 行为不变。
     """
     if not continue_url:
         return None
     url = continue_url if continue_url.startswith("http") else ("https://auth.openai.com" + continue_url)
     for hop in range(_MAX_REDIRECTS):
-        if _is_redirect_uri(url):
+        if _is_redirect_uri(url) or (callback_matcher and callback_matcher(url)):
             return url
         headers = session.get_auth_navigate_headers(referer="https://auth.openai.com/", user_initiated=True)
         resp = session.get(url, headers=headers, allow_redirects=False)
@@ -1125,6 +1129,7 @@ def _try_password_mfa_login(
     email: str,
     state: str,
     initial_result: dict | None,
+    callback_matcher=None,
 ) -> tuple[str, str | None, dict]:
     """
     有注册密码时优先走密码登录；如进入 MFA challenge，则使用账号 totp_secret 生成 TOTP。
@@ -1158,7 +1163,12 @@ def _try_password_mfa_login(
         logger.info("[Codex] 密码登录后服务端仍要求邮箱 OTP，切换到邮箱 OTP：%s", email)
         return "email_otp", None, result
 
-    callback_url = _follow_login_continue(session, continue_url, state) if continue_url else None
+    callback_url = _follow_login_continue(
+        session,
+        continue_url,
+        state,
+        callback_matcher=callback_matcher,
+    ) if continue_url else None
     logger.info("[Codex] 密码/MFA 登录链已完成，继续 Codex workspace/callback：%s", email)
     return "logged_in", callback_url, result
 

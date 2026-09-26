@@ -1874,6 +1874,23 @@
     .config-section-v2-actions {
       margin-top: 18px; display: flex; justify-content: flex-end; gap: 8px;
     }
+    .config-connection-v2 {
+      margin-top: 18px; padding: 12px 14px;
+      border: 1px solid #ebeef5; border-radius: 8px; background: #fafbfc;
+    }
+    .config-connection-v2-head {
+      display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    }
+    .config-connection-v2-title { color: #303133; font-size: 13px; font-weight: 600; }
+    .config-connection-v2-status {
+      margin: 8px 0 0; color: #909399; font-size: 12px; line-height: 1.5;
+      overflow-wrap: anywhere;
+    }
+    .config-connection-v2-status.is-ok { color: #166534; }
+    .config-connection-v2-status.is-error { color: #b3261e; }
+    .config-connection-v2-help {
+      margin: 5px 0 0; color: #909399; font-size: 12px; line-height: 1.45;
+    }
     .config-section-v2-placeholder {
       margin: 8px 0 0; font-size: 13px; color: #c0c4cc; line-height: 1.5;
     }
@@ -6322,11 +6339,23 @@ function renderConfigPlainFieldV2(f) {
     : field;
   return decorated + renderConfigRecommendedLinks(f);
 }
+function renderChatGPT2APIToolsV2() {
+  return `
+    <div class="config-connection-v2" id="chatgpt2apiConnectionV2">
+      <div class="config-connection-v2-head">
+        <span class="config-connection-v2-title">连接诊断</span>
+        <button type="button" class="btn" id="btnTestChatGPT2API">测试连接</button>
+      </div>
+      <p class="config-connection-v2-status" id="chatgpt2apiConnectionStatusV2">尚未测试</p>
+      <p class="config-connection-v2-help">测试当前已保存的地址和管理密钥，不会创建账号、导入账号或修改 Account Service 数据；修改配置后请先保存。</p>
+    </div>
+  `;
+}
 function renderMixedConfigSectionV2(name, fields, intro) {
   const slug = configGroupSlug(name);
   const switches = fields.filter(f => f.type === 'bool');
   const inputs = fields.filter(f => f.type !== 'bool');
-  const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : '';
+  const extra = name === 'RoxyBrowser' ? renderRoxyWorkspaceToolsV2() : (name === '账号池同步' ? renderChatGPT2APIToolsV2() : '');
   return `
     <section class="config-section-v2" id="${esc(slug)}" data-config-section="${esc(name)}">
       ${renderConfigSectionHead(name, intro || '')}
@@ -6467,6 +6496,27 @@ function bindCloudMailToolsV2() {
     domainBtn.dataset.bound = '1';
     domainBtn.addEventListener('click', () => loadCloudMailDomainsV2());
   }
+}
+function bindChatGPT2APIToolsV2() {
+  const btn = $('#btnTestChatGPT2API');
+  const status = $('#chatgpt2apiConnectionStatusV2');
+  if (!btn || !status || btn.dataset.bound) return;
+  btn.dataset.bound = '1';
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.className = 'config-connection-v2-status';
+    status.textContent = '正在检查地址和管理密钥...';
+    try {
+      const result = await api('/api/chatgpt2api/test-connection', { method: 'POST' });
+      status.className = `config-connection-v2-status ${result.ok ? 'is-ok' : 'is-error'}`;
+      status.textContent = result.message || (result.ok ? '连接成功' : '连接失败');
+    } catch (e) {
+      status.className = 'config-connection-v2-status is-error';
+      status.textContent = `连接测试失败：${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 function _configValueV2(key) {
   const root = document.querySelector(`#configSectionsV2 [data-key="${CSS.escape(key)}"]`);
@@ -6669,6 +6719,7 @@ function renderConfigLayoutV2() {
   if (sectionMount) renderRegistrationEpSelect(sectionMount, 'configRegistrationSelectV2');
   bindRoxyWorkspaceToolsV2();
   bindCloudMailToolsV2();
+  bindChatGPT2APIToolsV2();
 }
 function scrollToConfigSection(slug) {
   const el = document.getElementById(slug);

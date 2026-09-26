@@ -19,6 +19,13 @@ logger = logging.getLogger(__name__)
 _CC_CAPS = "login_methods chatgpt_login_finalizer_v1"
 
 
+def _reset_optional_circuit_breaker(session: BrowserSession) -> None:
+    """清理可选发现接口触发的本地熔断，保留 Cookie 与会话上下文。"""
+    reset = getattr(session, "reset_circuit_breaker", None)
+    if callable(reset):
+        reset()
+
+
 def _ensure_authorize_context(authorize_url: str, session: BrowserSession, email: str) -> str:
     """
     对 NextAuth 返回的 authorize URL 做最后兜底：确保当前前端默认
@@ -66,10 +73,11 @@ def get_providers(session: BrowserSession) -> dict:
     步骤1: 获取 OAuth Providers 列表。
     GET https://chatgpt.com/api/auth/providers
 
-    验证与 chatgpt.com 的连接是否正常，并获取可用的 OAuth 提供商。
+    尝试获取可用的 OAuth 提供商。该发现接口不是 signin/CSRF 链路的前置依赖，
+    Cloudflare 对它返回 403/429 时允许后续认证继续执行。
 
     Returns:
-        providers 字典，例如:
+        providers 字典，例如；若发现接口被临时拦截则返回空字典:
         {
             "openai": {
                 "id": "openai",
@@ -85,8 +93,32 @@ def get_providers(session: BrowserSession) -> dict:
     headers = session.get_nextauth_headers(referer="https://chatgpt.com/auth/login")
 
     logger.info("[步骤1] 获取 OAuth Providers...")
-    resp = session.get(url, headers=headers)
-    resp.raise_for_status()
+    resp = None
+    try:
+        resp = session.get(url, headers=headers)
+        resp.raise_for_status()
+    except Exception as exc:
+        # `/api/auth/providers` 仅用于页面发现；实际 signin 请求不会读取它。
+        # BrowserSession 会先记录 403/429 再抛出 HTTPError，必须清理本地熔断，
+        # 否则紧接着的 CSRF 请求会在客户端直接被拦截。
+        try:
+            status = int(getattr(resp, "status_code", 0) or 0)
+        except (TypeError, ValueError):
+            status = 0
+        if not status:
+            try:
+                status = int(getattr(getattr(exc, "response", None), "status_code", 0) or 0)
+            except (TypeError, ValueError):
+                status = 0
+        if status in (403, 429):
+            _reset_optional_circuit_breaker(session)
+            logger.warning(
+                "[步骤1] OAuth Providers 返回 HTTP %s；该发现接口为可选项，"
+                "已清理本地熔断并继续 CSRF/signin 链路",
+                status,
+            )
+            return {}
+        raise
 
     data = resp.json()
     logger.info(f"[步骤1] 成功获取 {len(data)} 个 providers: {list(data.keys())}")

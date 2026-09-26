@@ -57,10 +57,13 @@ OPENAI_PROXY_RETRY_DELAY = 1.0
 # 登录页预检使用独立的短超时。代理端口可连接并不代表其上游 TLS 链路可用，
 # 避免失效节点按全局 30 秒超时长时间占住注册 worker。
 OPENAI_PREFLIGHT_TIMEOUT = 12.0
+# 同一会话内预检重试耗尽后，重建会话以触发动态代理重新分配出口。
+OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS = 3
 
 
 apply_env_overrides(globals(), {
     "OPENAI_PROXY_RETRY_MAX_ATTEMPTS": "int",
     "OPENAI_PROXY_RETRY_DELAY": "float",
     "OPENAI_PREFLIGHT_TIMEOUT": "float",
+    "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS": "int",
 })
