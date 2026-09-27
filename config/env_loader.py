@@ -163,9 +163,12 @@ def write_env_values(updates: dict[str, str]) -> list[str]:
             written.append(key)
 
     text = "\n".join(out_lines).rstrip() + "\n"
-    tmp = _ENV_PATH.with_suffix(".env.tmp")
+    env_target = _ENV_PATH.resolve(strict=False)
+    tmp = env_target.with_name(env_target.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    tmp.replace(_ENV_PATH)
+    # Keep the runtime .env private even when the caller's umask is permissive.
+    tmp.chmod(0o600)
+    tmp.replace(env_target)
 
     # 让当前进程立刻看到新值
     load_env(override=True)
