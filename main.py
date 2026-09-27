@@ -812,8 +812,16 @@ def run_registration(
                     )
                     logger.warning(f"[邮箱:{src}] {email} 已创建但后续失败，标记为 failed，不再重新注册")
                 else:
-                    src = release_email(email, status="available", note=f"上次失败: {str(e)[:180]}")
-                    logger.info(f"[邮箱:{src}] {email} 已恢复 available")
+                    from core.email_provider import release_email_if_unconsumed, resolve_email_source
+                    source = resolve_email_source(email)
+                    changed = release_email_if_unconsumed(
+                        email,
+                        note=f"上次失败: {str(e)[:180]}",
+                    )
+                    if changed:
+                        logger.info(f"[邮箱:{source}] {email} 已恢复 available")
+                    else:
+                        logger.info(f"[邮箱:{source}] {email} 未回收：已存在注册账号或邮箱已被其他状态占用")
         except Exception:
             pass
         return {"success": False, "email": email, "error": str(e)}
