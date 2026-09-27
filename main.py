@@ -16,6 +16,7 @@ from config import twofa as _twofa_cfg
 from config import email as _email_cfg
 from config import roxybrowser as _roxy_cfg
 from config import openai_protocol as _protocol_cfg
+from config import codex as _codex_cfg
 from core.session import BrowserSession, close_browser_session
 from core.chatgpt_auth import get_providers, get_csrf_token, signin_openai
 from core.openai_auth import (
@@ -357,6 +358,25 @@ def prepare_registration_inputs() -> tuple[str | None, str, str]:
     return email, name, birthday
 
 
+def _run_optional_codex_oauth(email: str) -> dict:
+    """仅在显式开启时执行注册后的 Codex 授权。"""
+    if not bool(getattr(_codex_cfg, "ENABLE_CODEX_AUTO", False)):
+        return {
+            "status": "skipped",
+            "ok": False,
+            "message": "ENABLE_CODEX_AUTO=False，注册后跳过 Codex OAuth",
+        }
+    try:
+        from core.codex_oauth import run_codex_oauth
+        return run_codex_oauth(email)
+    except Exception as exc:
+        return {
+            "status": "failed",
+            "ok": False,
+            "message": f"{type(exc).__name__}: {str(exc)[:180]}",
+        }
+
+
 def run_registration(
     email: str | None,
     name: str,
@@ -654,22 +674,10 @@ def run_registration(
         else:
             logger.debug("已跳过 2FA 设置 (config.ENABLE_2FA=False)")
 
-        # ==================== 阶段 7.5: Codex OAuth（注册成功→拿回调/CPA凭证）====================
-        # 用全新干净 session 从头登录该邮箱，走 邮箱OTP→手机短信验证(接码)→选workspace
-        # →拿 code 的标准路径（不复用注册 session，避免撞 choose-an-account）。
-        # 产出：
-        #   1) codex_result["callback_url"]  命中 redirect_uri 的整条 Location（携带 code/state）
-        #   2) codex_result["file_path"]     CPA 可直接导入的 codex-{email}.json
-        codex_result = {"status": "skipped", "ok": False, "message": "未触发"}
-        try:
-            from core.codex_oauth import run_codex_oauth
-            codex_result = run_codex_oauth(email)
-        except Exception as exc:
-            codex_result = {
-                "status": "failed",
-                "ok": False,
-                "message": f"{type(exc).__name__}: {str(exc)[:180]}",
-            }
+        # ==================== 阶段7.5: Codex OAuth（可选后续步骤）====================
+        # 注册成功本身不依赖 Codex。只有显式开启 ENABLE_CODEX_AUTO 时，
+        # 才为已注册邮箱启动独立的 Codex 授权流程。
+        codex_result = _run_optional_codex_oauth(email)
 
         if codex_result.get("ok"):
             logger.info(
@@ -749,15 +757,13 @@ def run_registration(
 
         logger.debug(f"[完成] TOTP Secret: {totp_secret or '(未设置)'}")
 
-        # 注册任务的成功判定：账号本身(注册+token)+Codex 授权都成功才算 success。
-        # Codex 失败时账号仍保存（token 拿到了、有补跑机会），但任务状态标失败，
-        # 让 WebUI 任务表能清楚区分"完整成功"和"差 Codex"两种结果。
-        codex_ok = codex_result.get("ok") or codex_result.get("status") == "skipped"
-        task_success = codex_ok
+        # 注册任务的成功判定只看注册账号是否成功落库；Codex 是独立的
+        # 可选后续操作，即使授权失败也不能把已经完成的注册标成 partial_success。
+        task_success = bool(account_id)
         task_error = None
         if not task_success:
-            task_error = f"Codex 未完成: {codex_result.get('message', '未知')}"
-            logger.warning(f"[任务结果] {email} 账号已保存但任务标失败，原因: {task_error}")
+            task_error = "注册账号未成功保存"
+            logger.warning(f"[任务结果] {email} 注册未完成，账号未保存")
 
         return {"success": task_success, "email": email, "account_id": account_id,
                 "access_token": access_token, "totp_secret": totp_secret,

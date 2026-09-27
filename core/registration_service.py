@@ -35,6 +35,13 @@ _ACTIVE_JOBS: set[int] = set()
 _STOP_LOCK = threading.Lock()
 _THREAD_CTX = threading.local()
 
+# Gunicorn commonly leaves the root logger at WARNING.  Keep the temporary
+# per-job FileHandler useful without permanently changing the process logging
+# configuration, and restore the original level only after the last job exits.
+_JOB_LOG_LEVEL_LOCK = threading.RLock()
+_JOB_LOG_ACTIVE = 0
+_JOB_LOG_PREVIOUS_ROOT_LEVEL: int | None = None
+
 
 class StopRequested(RuntimeError):
     """用户手动停止注册任务。"""
@@ -251,8 +258,12 @@ class _JobLogContext:
     def __init__(self, log_path: str):
         self.log_path = log_path
         self.handler: logging.FileHandler | None = None
+        self.root_logger = logging.getLogger()
+        self._registered = False
 
     def __enter__(self):
+        global _JOB_LOG_ACTIVE, _JOB_LOG_PREVIOUS_ROOT_LEVEL
+
         Path(self.log_path).parent.mkdir(parents=True, exist_ok=True)
         self.handler = logging.FileHandler(self.log_path, encoding="utf-8")
         self.handler.setLevel(logging.INFO)
@@ -263,13 +274,30 @@ class _JobLogContext:
         # 仅给本线程过滤 —— 用 thread name 做区分，避免污染其他任务的日志
         thread_name = threading.current_thread().name
         self.handler.addFilter(lambda r: r.threadName == thread_name)
-        logging.getLogger().addHandler(self.handler)
+
+        with _JOB_LOG_LEVEL_LOCK:
+            if _JOB_LOG_ACTIVE == 0:
+                _JOB_LOG_PREVIOUS_ROOT_LEVEL = self.root_logger.level
+                if self.root_logger.level > logging.INFO:
+                    self.root_logger.setLevel(logging.INFO)
+            _JOB_LOG_ACTIVE += 1
+            self.root_logger.addHandler(self.handler)
+            self._registered = True
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self.handler is not None:
-            self.handler.close()
-            logging.getLogger().removeHandler(self.handler)
+        global _JOB_LOG_ACTIVE, _JOB_LOG_PREVIOUS_ROOT_LEVEL
+
+        if self.handler is None or not self._registered:
+            return
+        with _JOB_LOG_LEVEL_LOCK:
+            self.root_logger.removeHandler(self.handler)
+            _JOB_LOG_ACTIVE = max(0, _JOB_LOG_ACTIVE - 1)
+            if _JOB_LOG_ACTIVE == 0 and _JOB_LOG_PREVIOUS_ROOT_LEVEL is not None:
+                self.root_logger.setLevel(_JOB_LOG_PREVIOUS_ROOT_LEVEL)
+                _JOB_LOG_PREVIOUS_ROOT_LEVEL = None
+            self._registered = False
+        self.handler.close()
 
 
 def _run_one_job(job_id: int, log_file: str) -> None:
@@ -501,13 +529,24 @@ def get_retry_info(job: dict) -> dict:
     if status not in ("failed", "stopped", "cancelled"):
         return info
 
+    account = _account_for_job(job)
+    job_type = str(job.get("job_type") or "registration")
+    if account and job_type == "registration":
+        # 账号已经落库，注册动作本身已经完成。Codex 是独立的可选后续
+        # 操作，不应把注册任务显示成 partial_success 或把重试导向 Codex。
+        info.update({
+            "display_status": "success",
+            "error_message": None,
+            "retry_reason": "注册账号已成功保存，无需重试注册",
+        })
+        return info
+
     successful_retry = db.get_successful_retry_for_job(int(job.get("id") or 0))
     if successful_retry is not None:
         info["retry_reason"] = f"后续重试任务 #{successful_retry.get('id')} 已成功"
         info["successful_retry_job_id"] = successful_retry.get("id")
         return info
 
-    account = _account_for_job(job)
     if account and job.get("account_id") is not None and status in ("failed", "stopped"):
         info["display_status"] = "success" if (account.get("codex_status") or "") == "success" else "partial_success"
 
@@ -535,7 +574,7 @@ def get_retry_info(job: dict) -> dict:
 
 
 def retry_job(job_id: int, workers: int | None = None) -> dict:
-    """智能重试终态任务：未生成账号则重新注册，已有账号则仅补跑 Codex。"""
+    """重试未完成注册任务；已落库账号不再从注册任务进入 Codex 补跑。"""
     source = db.get_job(job_id)
     if source is None:
         return {"ok": False, "error": "任务不存在", "status": 404}
@@ -689,17 +728,43 @@ def request_stop_job(job_id: int) -> dict:
     return {"ok": False, "error": f"当前状态不支持停止：{status}", "status": 409}
 
 
+def _empty_job_log_summary(job: dict) -> str:
+    """旧任务未捕获到日志时，至少返回可核对的任务摘要，避免 WebUI 空白。"""
+    status = str(job.get("status") or "unknown")
+    if status in ("failed", "stopped", "cancelled") and job.get("account_id") is not None:
+        status = "success (account saved)"
+    lines = [
+        "[任务摘要] 该任务没有可读取的过程日志。",
+        f"status={status}",
+    ]
+    if job.get("email"):
+        lines.append(f"email={job['email']}")
+    if job.get("account_id") is not None:
+        lines.append(f"account_id={job['account_id']}")
+    if job.get("started_at"):
+        lines.append(f"started_at={job['started_at']}")
+    if job.get("completed_at"):
+        lines.append(f"completed_at={job['completed_at']}")
+    if job.get("error_message"):
+        lines.append(f"error={str(job['error_message'])[:500]}")
+    return "\n".join(lines) + "\n"
+
+
 def read_job_log(job_id: int, max_bytes: int = 50_000) -> str:
     """读取任务日志文件最后 max_bytes 字节，给 Web UI 显示。"""
     job = db.get_job(job_id)
-    if not job or not job.get("log_file"):
+    if not job:
         return ""
-    p = Path(job["log_file"])
+    log_file = job.get("log_file")
+    if not log_file:
+        return _empty_job_log_summary(job)
+    p = Path(log_file)
     if not p.exists():
-        return ""
+        return _empty_job_log_summary(job)
     size = p.stat().st_size
     with p.open("rb") as f:
         if size > max_bytes:
             f.seek(size - max_bytes)
         data = f.read()
-    return data.decode("utf-8", errors="replace")
+    content = data.decode("utf-8", errors="replace")
+    return content if content.strip() else _empty_job_log_summary(job)
