@@ -104,13 +104,13 @@ def _random_display_name() -> str:
     return random_display_name()
 
 
-def _prepare_registration_args() -> tuple[str | None, str, str]:
-    """复用 CLI 的默认规则，为旧 Web 任务入口补齐注册参数。"""
+def _prepare_registration_args(job_email: str | None = None) -> tuple[str | None, str, str]:
+    """为注册任务补齐参数；重试任务优先复用任务记录中的邮箱。"""
     # 用模块属性读，支持 WebUI 热加载
     from config import register as _r, email as _e
     from core.profile_utils import generate_random_birthday
 
-    email = str(getattr(_r, "REGISTER_EMAIL", "") or "").strip()
+    email = str(job_email or getattr(_r, "REGISTER_EMAIL", "") or "").strip()
     name = str(getattr(_r, "REGISTER_NAME", "") or "").strip()
     # WebUI/配置里有时会把空值存成 "-"，这不是合法 OpenAI 显示名，按空处理并自动生成
     if name in {"-", "—", "无", "空", "none", "None", "null", "NULL"}:
@@ -319,12 +319,12 @@ def _run_one_job(job_id: int, log_file: str) -> None:
 
     db.update_job(job_id, status="running", started_at=datetime.now().isoformat(timespec="seconds"))
 
-    email: str | None = None
+    email: str | None = str(current.get("email") or "").strip() or None
     try:
         with _JobLogContext(log_file):
             from main import run_registration
             log_logger.info(f"[Job {job_id}] 开始注册任务")
-            email, name, birthday = _prepare_registration_args()
+            email, name, birthday = _prepare_registration_args(email)
             db.update_job(job_id, email=email)
             check_stop_requested()
             def _on_email_acquired(acquired_email: str) -> None:
@@ -601,7 +601,7 @@ def retry_job(job_id: int, workers: int | None = None) -> dict:
             int(job_id),
             job_type="codex_retry" if action == "codex" else "registration",
             email_source=str(source.get("email_source") or "outlook"),
-            email=email if action == "codex" else None,
+            email=email or None,
             account_id=account_id if action == "codex" else None,
         )
     except LookupError as exc:

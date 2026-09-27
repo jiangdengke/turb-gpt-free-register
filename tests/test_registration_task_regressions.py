@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from urllib.error import HTTPError
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import main
 from core import registration_service as service
@@ -115,6 +115,75 @@ class RegistrationTaskRegressionTests(unittest.TestCase):
         self.assertEqual(access_token, "synthetic-access-token")
         self.assertEqual(session.reset_calls, 1)
         self.assertEqual(follow_callback.call_count, 2)
+
+    def test_prepare_registration_args_prefers_retry_job_email(self):
+        expected_email = "original@example.com"
+        with patch("config.register.REGISTER_EMAIL", "configured@example.com"), patch(
+            "config.email.USE_EMAIL_SERVICE", True
+        ), patch.object(service, "_random_display_name", return_value="Synthetic Name"), patch(
+            "core.profile_utils.generate_random_birthday", return_value="1990-01-01"
+        ):
+            email, name, birthday = service._prepare_registration_args(expected_email)
+
+        self.assertEqual(email, expected_email)
+        self.assertEqual(name, "Synthetic Name")
+        self.assertEqual(birthday, "1990-01-01")
+
+    def test_registration_retry_job_inherits_source_email(self):
+        source = {
+            "id": 91,
+            "job_type": "registration",
+            "status": "failed",
+            "email": "original@example.com",
+            "email_source": "generic_api",
+            "log_file": "/tmp/retry.log",
+        }
+        retry = {
+            "id": 92,
+            "job_type": "registration",
+            "status": "pending",
+            "email": source["email"],
+            "log_file": "/tmp/retry-child.log",
+        }
+        executor = Mock()
+        with patch.object(service.db, "get_job", return_value=source), patch.object(
+            service, "get_retry_info", return_value={"retryable": True, "retry_action": "registration"}
+        ), patch.object(service.db, "create_retry_job", return_value=(retry, True)) as create_retry, patch.object(
+            service, "get_executor", return_value=executor
+        ), patch.object(service, "_executor_lock"):
+            result = service.retry_job(91, workers=1)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["job"]["email"], source["email"])
+        create_retry.assert_called_once_with(
+            91,
+            job_type="registration",
+            email_source="generic_api",
+            email="original@example.com",
+            account_id=None,
+        )
+        executor.submit.assert_called_once_with(
+            service._run_one_job, 92, "/tmp/retry-child.log"
+        )
+
+    def test_run_one_job_passes_recorded_email_to_registration(self):
+        source = {
+            "id": 92,
+            "status": "pending",
+            "email": "original@example.com",
+            "log_file": "/tmp/retry-child.log",
+        }
+        with patch.object(service, "_activate_job"), patch.object(service, "_deactivate_job"), patch.object(
+            service.db, "get_job", return_value=source
+        ), patch.object(service.db, "update_job"), patch.object(
+            service, "_prepare_registration_args", return_value=(source["email"], "Synthetic Name", "1990-01-01")
+        ) as prepare, patch.object(service, "check_stop_requested"), patch(
+            "main.run_registration", return_value={"success": True, "email": source["email"], "account_id": 12}
+        ) as run_registration:
+            service._run_one_job(92, source["log_file"])
+
+        prepare.assert_called_once_with(source["email"])
+        self.assertEqual(run_registration.call_args.kwargs["email"], source["email"])
 
     def test_protocol_registration_does_not_start_codex_when_disabled(self):
         with patch.object(main._codex_cfg, "ENABLE_CODEX_AUTO", False), patch(
