@@ -681,8 +681,8 @@ def _account_full_export_line(row: dict) -> str:
     """
     email = str(row.get("email") or "").strip()
     email_api = _resolve_email_api_link(email, str(row.get("email_source") or "").strip())
-    # 仅填 ChatGPT 注册密码；若该账号没有，则留空。
-    password = _extract_registration_password(row)
+    # 没有设置 ChatGPT 注册密码的 OTP 账号，显式保留状态，避免导出时看起来像字段丢失。
+    password = _extract_registration_password(row) or "未设置"
     totp = str(row.get("totp_secret") or "").strip()
     line = "---".join([email, email_api, password, _TWOFA_EXPORT_URL])
     line = line + "----" + ("2FA:" + totp)

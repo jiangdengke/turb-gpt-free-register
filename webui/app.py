@@ -178,8 +178,6 @@ def _account_secret_value(row: dict, field: str) -> str:
         return pyotp.TOTP(secret).now() if secret else ""
     if field == "login_credentials":
         password = _account_secret_value(row, "password")
-        if password == "未设置":
-            password = ""
         return "---".join((
             str(row.get("email") or "").strip(), password, str(row.get("totp_secret") or "").strip(),
         ))

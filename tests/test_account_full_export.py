@@ -30,13 +30,12 @@ class AccountFullExportTests(unittest.TestCase):
         self.assertTrue(line.startswith("a@b.com---gptmail---Pass123---https://2fa.run/----2FA:ABCDEF123"))
         self.assertIn("---https://2fa.run/----2FA:", line)
 
-    def test_missing_registration_password_keeps_empty_field(self):
+    def test_missing_registration_password_is_explicit_in_full_export(self):
         row = self._row(extra_json=json.dumps({}))
         line = db._account_full_export_line(row)
-        # 空密码是“真实空字段”，由相邻 “---” 收拢为 “------”，保持 5 段结构可读
         self.assertEqual(
             line,
-            "a@b.com---gptmail------https://2fa.run/----2FA:ABCDEF123",
+            "a@b.com---gptmail---未设置---https://2fa.run/----2FA:ABCDEF123",
         )
 
     def test_missing_totp_keeps_prefix(self):

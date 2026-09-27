@@ -28,7 +28,7 @@ class WebUiLoginCredentialsCopyTests(unittest.TestCase):
         )
 
     @patch("webui.app.db.get_account")
-    def test_secret_endpoint_keeps_empty_password_and_totp_positions(self, get_account):
+    def test_secret_endpoint_marks_missing_password_explicitly(self, get_account):
         get_account.return_value = {
             "id": 42,
             "email": "legacy@example.test",
@@ -38,7 +38,7 @@ class WebUiLoginCredentialsCopyTests(unittest.TestCase):
         response = self.client.get("/api/accounts/42/secret?field=login_credentials")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.get_json()["value"], "legacy@example.test------")
+        self.assertEqual(response.get_json()["value"], "legacy@example.test---未设置---")
 
 
 if __name__ == "__main__":
