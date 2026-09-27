@@ -55,6 +55,16 @@ _FINALIZE_SESSION_MAX_ATTEMPTS = 5
 _FINALIZE_SESSION_BACKOFF_BASE = 2.0
 
 
+def _reset_retryable_session_circuit(session: BrowserSession) -> None:
+    """Clear the local breaker while retaining the session cookies and state."""
+    reset = getattr(session, "reset_circuit_breaker", None)
+    if callable(reset):
+        reset()
+        return
+    session.blocked_until = 0.0
+    session.blocked_reason = ""
+
+
 def _network_preflight_with_session_rotation(
     session: BrowserSession,
     requested_proxy: str | None,
@@ -311,6 +321,12 @@ def _finalize_registration_session(
             last_exc = exc
             if attempt >= _FINALIZE_SESSION_MAX_ATTEMPTS:
                 break
+            if _is_retryable_authorize_error(exc):
+                # BrowserSession records callback 403/429 as a local breaker. Reset
+                # only for retryable failures so the next attempt can reach the
+                # network with the refreshed CF cookie and existing OAuth state.
+                _reset_retryable_session_circuit(session)
+                logger.info("[登录态] 清理当前会话熔断，保留 Cookie 后重试")
             backoff = _FINALIZE_SESSION_BACKOFF_BASE ** (attempt - 1)
             logger.warning(
                 f"[登录态] 回调或拉取 Token 失败：{email}，"

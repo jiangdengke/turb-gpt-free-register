@@ -3,6 +3,7 @@ import logging
 import tempfile
 import unittest
 from pathlib import Path
+from urllib.error import HTTPError
 from unittest.mock import patch
 
 import main
@@ -82,6 +83,38 @@ class RegistrationTaskRegressionTests(unittest.TestCase):
         self.assertFalse(info["retryable"])
         self.assertIsNone(info["retry_action"])
         self.assertIsNone(info["error_message"])
+
+    def test_finalize_registration_clears_breaker_after_retryable_callback_403(self):
+        class FakeSession:
+            def __init__(self):
+                self.reset_calls = 0
+
+            def reset_circuit_breaker(self):
+                self.reset_calls += 1
+
+        session = FakeSession()
+        callback_403 = HTTPError(
+            "https://chatgpt.com/api/auth/callback/openai",
+            403,
+            "",
+            {},
+            None,
+        )
+        with patch.object(
+            main, "follow_oauth_callback", side_effect=[callback_403, "https://chatgpt.com/"]
+        ) as follow_callback, patch.object(
+            main, "fetch_session", return_value={"accessToken": "synthetic-access-token"}
+        ), patch.object(main, "human_delay"), patch.object(main.time, "sleep"):
+            session_info, access_token = main._finalize_registration_session(
+                session,
+                "https://auth.openai.com/authorize/continue?synthetic=1",
+                "synthetic@example.com",
+            )
+
+        self.assertEqual(session_info["accessToken"], "synthetic-access-token")
+        self.assertEqual(access_token, "synthetic-access-token")
+        self.assertEqual(session.reset_calls, 1)
+        self.assertEqual(follow_callback.call_count, 2)
 
     def test_protocol_registration_does_not_start_codex_when_disabled(self):
         with patch.object(main._codex_cfg, "ENABLE_CODEX_AUTO", False), patch(
