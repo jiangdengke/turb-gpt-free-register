@@ -75,6 +75,55 @@ class ProtocolPreflightSessionRotationTests(unittest.TestCase):
         self.assertEqual(follow.call_args_list[1].args, (second, "authorize-2"))
         create_session.assert_called_once_with(proxy=None)
         close_session.assert_called_once_with(first)
+    def test_proxy_failure_can_fall_back_to_direct_before_otp(self):
+        first = object()
+        direct = object()
+
+        with patch.object(
+            main._protocol_cfg,
+            "OPENAI_DIRECT_FALLBACK_ON_PROXY_FAILURE",
+            True,
+        ), patch.object(
+            main,
+            "_run_pre_otp_authorization_with_session_rotation",
+            side_effect=[RuntimeError("HTTP Error 403"), direct],
+        ) as authorize, patch.object(
+            main,
+            "BrowserSession",
+            return_value=object(),
+        ) as create_session, patch.object(main, "close_browser_session") as close_session:
+            result = main._run_pre_otp_authorization_with_direct_fallback(
+                first,
+                None,
+                "user@example.com",
+            )
+
+        self.assertIs(result, direct)
+        self.assertEqual(authorize.call_args_list[0].args, (first, None, "user@example.com"))
+        self.assertEqual(authorize.call_args_list[1].args[1:], ("", "user@example.com"))
+        create_session.assert_called_once_with(proxy="")
+        close_session.assert_called_once_with(first)
+
+    def test_explicit_proxy_does_not_fall_back_to_direct(self):
+        first = object()
+        with patch.object(
+            main._protocol_cfg,
+            "OPENAI_DIRECT_FALLBACK_ON_PROXY_FAILURE",
+            True,
+        ), patch.object(
+            main,
+            "_run_pre_otp_authorization_with_session_rotation",
+            side_effect=RuntimeError("HTTP Error 403"),
+        ) as authorize, patch.object(main, "BrowserSession") as create_session:
+            with self.assertRaisesRegex(RuntimeError, "HTTP Error 403"):
+                main._run_pre_otp_authorization_with_direct_fallback(
+                    first,
+                    "http://proxy.example:8080",
+                    "user@example.com",
+                )
+
+        authorize.assert_called_once_with(first, "http://proxy.example:8080", "user@example.com")
+        create_session.assert_not_called()
 
 
 if __name__ == "__main__":

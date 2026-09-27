@@ -221,6 +221,40 @@ def _run_pre_otp_authorization_with_session_rotation(
     raise RuntimeError("OTP 前 authorize 链路重试耗尽但无异常记录")
 
 
+def _run_pre_otp_authorization_with_direct_fallback(
+    session: BrowserSession,
+    requested_proxy: str | None,
+    email: str,
+) -> BrowserSession:
+    """Optionally switch a pool-proxy failure to direct networking before OTP."""
+    try:
+        return _run_pre_otp_authorization_with_session_rotation(
+            session,
+            requested_proxy,
+            email,
+        )
+    except Exception as exc:
+        enabled = bool(getattr(_protocol_cfg, "OPENAI_DIRECT_FALLBACK_ON_PROXY_FAILURE", False))
+        # Only an implicit pool route may fall back; explicit proxy arguments stay authoritative.
+        if requested_proxy is not None or not enabled or not _is_retryable_authorize_error(exc):
+            raise
+        logger.warning(
+            "[认证] 代理前置链路失败：%s: %s；OTP 尚未触发，切换直连重试",
+            type(exc).__name__,
+            str(exc)[:180],
+        )
+        try:
+            close_browser_session(session)
+        except Exception:
+            logger.debug("[认证] 关闭代理会话时出现异常", exc_info=True)
+        direct_session = BrowserSession(proxy="")
+        return _run_pre_otp_authorization_with_session_rotation(
+            direct_session,
+            "",
+            email,
+        )
+
+
 def configure_logging(verbose: bool = False) -> None:
     """配置 CLI 日志：默认简洁，--verbose 时显示完整步骤细节。"""
     root = logging.getLogger()
@@ -440,7 +474,7 @@ def run_registration(
     try:
         # 网络预检、bootstrap、providers、CSRF、signin、authorize 必须作为一个完整前置链路；
         # OTP 尚未可靠触发时，任一可重试 403 都可以安全换会话重来。
-        session = _run_pre_otp_authorization_with_session_rotation(
+        session = _run_pre_otp_authorization_with_direct_fallback(
             session,
             proxy,
             email,

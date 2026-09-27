@@ -59,6 +59,8 @@ OPENAI_PROXY_RETRY_DELAY = 1.0
 OPENAI_PREFLIGHT_TIMEOUT = 12.0
 # 同一会话内预检重试耗尽后，重建会话以触发动态代理重新分配出口。
 OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS = 3
+# True 时，代理池在 OTP 前连续失败会切换直连；显式传入的代理不受影响。
+OPENAI_DIRECT_FALLBACK_ON_PROXY_FAILURE = False
 
 
 apply_env_overrides(globals(), {
@@ -66,4 +68,5 @@ apply_env_overrides(globals(), {
     "OPENAI_PROXY_RETRY_DELAY": "float",
     "OPENAI_PREFLIGHT_TIMEOUT": "float",
     "OPENAI_PREFLIGHT_SESSION_MAX_ATTEMPTS": "int",
+    "OPENAI_DIRECT_FALLBACK_ON_PROXY_FAILURE": "bool",
 })
