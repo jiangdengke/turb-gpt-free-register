@@ -136,6 +136,17 @@ class ConfigDefaultFallbackTests(unittest.TestCase):
                     browser.BROWSER_DATA_SAVER_BLOCKED_URL_PATTERNS,
                 )
 
+    def test_browser_transport_uses_current_chrome150_fingerprint(self):
+        from curl_cffi import requests
+
+        with _browser_source_defaults():
+            self.assertEqual(browser.CHROME_MAJOR, "150")
+            self.assertEqual(browser.IMPERSONATE, "chrome150")
+            self.assertIn(f"Chrome/{browser.CHROME_FULL_VERSION}", browser.USER_AGENT)
+            self.assertIn('"Google Chrome";v="150"', browser.SEC_CH_UA)
+            session = requests.Session(impersonate=browser.IMPERSONATE)
+            session.close()
+
 
 if __name__ == "__main__":
     unittest.main()
