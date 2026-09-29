@@ -740,7 +740,7 @@
     .accounts-table-v2 .col-source { width: 90px; }
     .accounts-table-v2 .col-token { width: 100px; }
     .accounts-table-v2 .col-password { width: 120px; }
-    .accounts-table-v2 .col-plan { width: 120px; }
+    .accounts-table-v2 .col-plan { width: 220px; }
     .accounts-table-v2 .col-note { width: 140px; }
     .accounts-table-v2 .col-small { width: 170px; }
     .accounts-table-v2 .col-status { width: 100px; }
@@ -820,6 +820,17 @@
     }
     .accounts-table-v2 .pill.status-running {
       color: #fa8c16; background: #fff7e6; border-color: #ffd591;
+    }
+    .accounts-table-v2 .plan-promo-stack {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 4px;
+      width: 100%; white-space: normal;
+    }
+    .accounts-table-v2 .plan-promo-head {
+      display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+    }
+    .accounts-table-v2 .plan-promo-stack .pill {
+      height: auto; min-height: 26px; max-width: 100%; line-height: 1.3;
+      text-align: left; white-space: normal; overflow-wrap: anywhere;
     }
     .accounts-table-v2 .acc-v2-token-copy {
       display: inline-flex; align-items: center; justify-content: center;
@@ -2254,9 +2265,15 @@
             </span>
           </label>
           <button type="button" class="acc-v2-toggle" id="showArchivedAccountsV2" aria-pressed="false" title="默认只显示未归档账号；开启后单独查看归档账号">查看归档</button>
-          <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通 Plus 的账号">已开通Plus</button>
-          <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且可试用 Plus 的账号">可试用Plus</button>
-          <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只查询/显示已明确不能试用 Plus 的 free 账号；资格未知的账号不包含">free不可试用Plus</button>
+          <button type="button" class="acc-v2-toggle" id="showPlusAccountsOnlyV2" aria-pressed="false" title="只查询/显示已开通套餐的账号">已开通套餐</button>
+          <button type="button" class="acc-v2-toggle" id="showPlusTrialAccountsOnlyV2" aria-pressed="false" title="只查询/显示当前为 free 且存在 eligible_promo_campaigns 套餐优惠的账号，不限 Plus">有套餐优惠</button>
+          <label class="acc-v2-inline" title="指定 eligible_promo_campaigns 中的套餐类型；留空表示全部优惠类型">优惠类型
+            <select id="promoTypeFilterV2"><option value="">全部</option><option value="plus">Plus</option><option value="pro">Pro</option><option value="go">Go</option><option value="team">Team</option><option value="business">Business</option></select>
+          </label>
+          <label class="acc-v2-inline" title="按 eligible_promo_campaigns 优惠百分比筛选">优惠力度
+            <select id="promoDiscountFilterV2"><option value="">全部</option><option value="100">100%优惠</option></select>
+          </label>
+          <button type="button" class="acc-v2-toggle" id="showFreeAccountsOnlyV2" aria-pressed="false" title="只查询/显示已明确不能试用套餐的 free 账号；资格未知的账号不包含">free不可试用套餐</button>
           <label class="acc-v2-inline" title="按账号状态筛选账号">
             <select id="codexStatusFilterV2">
               <option value="">全部状态</option>
@@ -2364,7 +2381,7 @@
       <div class="log" id="liveLogContent">加载中…</div>
     </div>
     <div class="body hidden" id="totpLogPanel">
-      <h3>2FA日志：<span id="totpLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
+      <h3><span id="totpLogTitle">2FA日志</span>：<span id="totpLogEmail" style="font-size:13px;font-weight:400;color:var(--muted);"></span>
         <button class="btn" id="btnCloseTotpLog" style="float:right;min-height:28px;">关闭</button>
       </h3>
       <div class="log" id="totpLogContent">加载中…</div>
@@ -3345,7 +3362,11 @@ function getCodexBulkWorkers() {
 }
 function getAccountsPlanFilter() {
   if (SHOW_PLUS_ACCOUNTS_ONLY) return 'plus';
-  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) return 'plus_trial';
+  if (SHOW_PLUS_TRIAL_ACCOUNTS_ONLY) {
+    const type = (document.getElementById('promoTypeFilterV2')?.value || '').trim().toLowerCase();
+    const discount = (document.getElementById('promoDiscountFilterV2')?.value || '').trim();
+    return (type || discount) ? `promo:${type || '*'}:${discount}` : 'promo';
+  }
   if (SHOW_FREE_ACCOUNTS_ONLY) return 'free_no_trial';
   return '';
 }
@@ -3459,6 +3480,18 @@ function _totpCellV2(r) {
     : `<span class="acc-v2-muted">无Token</span>`;
   return `<div class="agent-token-cell">${btn}</div>`;
 }
+function _chatgptPasswordAction(r) {
+  const status = r.chatgpt_password_status || '';
+  const title = r.chatgpt_password_error || r.chatgpt_password_message || '';
+  const titleAttr = title ? ` title="${esc(title)}"` : '';
+  if (r.password || status === 'success') return `<span class="pill status-success"${titleAttr}>密码已设置</span><button type="button" data-account-chatgpt-password-log="${esc(r.email)}" title="查看最近一次 ChatGPT 密码设置日志">密码日志</button>`;
+  if (status === 'queued' || status === 'running') return `<span class="pill status-running"${titleAttr}>${status === 'queued' ? '密码排队中' : '设置密码中'}</span><button type="button" data-account-chatgpt-password-log="${esc(r.email)}" title="查看最近一次 ChatGPT 密码设置日志">密码日志</button>`;
+  const label = status === 'failed' ? '重试设置密码' : '设置ChatGPT密码';
+  const button = r.has_access_token
+    ? `<button type="button" data-account-chatgpt-password="${esc(r.id)}"${titleAttr}>${label}</button>`
+    : `<span class="acc-v2-muted">无Token</span>`;
+  return `${button}<button type="button" data-account-chatgpt-password-log="${esc(r.email)}" title="查看最近一次 ChatGPT 密码设置日志">密码日志</button>`;
+}
 function _codexAgentCell(r) {
   const s = r.codex_agent_status || '';
   const err = r.codex_agent_error || '';
@@ -3508,6 +3541,42 @@ function _discountLabel(r) {
   if (!Number.isNaN(n)) return `${n}折扣`;
   return `${amount}折扣`;
 }
+function _promoPlanName(key, campaign) {
+  const meta = (campaign && typeof campaign === 'object' && campaign.metadata && typeof campaign.metadata === 'object') ? campaign.metadata : {};
+  const raw = String(meta.plan_name || key || '套餐').trim();
+  const known = {
+    chatgptplusplan:'Plus', chatgptproplan:'Pro', chatgptteamplan:'Team',
+    chatgptbusinessplan:'Business', chatgptgoplan:'Go', plus:'Plus', pro:'Pro',
+    team:'Team', business:'Business', go:'Go'
+  };
+  const normalized = raw.toLowerCase().replace(/[\s_-]/g, '');
+  if (known[normalized]) return known[normalized];
+  return raw.replace(/^chatgpt/i, '').replace(/plan$/i, '') || raw;
+}
+function _promoDurationLabel(duration) {
+  if (!duration || typeof duration !== 'object' || duration.num_periods == null) return '';
+  const n = duration.num_periods;
+  const period = String(duration.period || '').toLowerCase();
+  const unit = period === 'month' ? '个月' : period === 'year' ? '年' : period === 'week' ? '周' : period === 'day' ? '天' : period;
+  return `${n}${unit}`;
+}
+function _promoSummaries(campaigns) {
+  if (!campaigns || typeof campaigns !== 'object') return [];
+  return Object.entries(campaigns).map(([key, campaign]) => {
+    const meta = (campaign && typeof campaign === 'object' && campaign.metadata && typeof campaign.metadata === 'object') ? campaign.metadata : {};
+    const percentage = meta.discount && meta.discount.percentage;
+    const offer = percentage !== undefined && percentage !== null && percentage !== ''
+      ? (Number(percentage) === 100 ? '免费' : `${percentage}%折扣`)
+      : String(meta.promotion_type_label || meta.title || (campaign && campaign.id) || '有优惠');
+    const duration = _promoDurationLabel(meta.duration);
+    return `${_promoPlanName(key, campaign)}：${offer}${duration ? `/${duration}` : ''}`;
+  });
+}
+function _promoStackHtml(baseText, baseClass, summaries, title, detailBtn = '') {
+  const base = `<span class="pill ${baseClass}" title="${esc(title)}">${esc(baseText)}</span>`;
+  const lines = summaries.map(item => `<span class="pill status-success" title="${esc(item)}">${esc(item)}</span>`).join('');
+  return `<div class="plan-promo-stack"><div class="plan-promo-head">${base}${detailBtn}</div>${lines}</div>`;
+}
 function _planCell(r) {
   const ok = r.plan_check_ok;
   const err = r.plan_check_error || '';
@@ -3518,6 +3587,8 @@ function _planCell(r) {
     route === 'direct_fallback' ? `网络: 直连回退${r.plan_check_proxy_fallback_reason ? ` (${r.plan_check_proxy_fallback_reason})` : ''}` :
     route === 'direct' ? '网络: 直连' : '';
   const title = [err ? esc(err) : checked, routeLabel].filter(Boolean).join('；');
+  const campaigns = (r.eligible_promo_campaigns && typeof r.eligible_promo_campaigns === 'object') ? r.eligible_promo_campaigns : {};
+  const promoSummaries = _promoSummaries(campaigns);
   if (['queued','running'].includes(r.plan_check_status)) {
     const automatic = r.plan_check_trigger === 'registration_auto';
     const queued = r.plan_check_status === 'queued';
@@ -3529,7 +3600,7 @@ function _planCell(r) {
   if (err || r.plan_check_status === 'failed') {
     const reason = err || '套餐查询失败，未返回具体原因';
     const hasLastSuccess = Boolean(r.plan_last_success_at);
-    const lastPlan = hasLastSuccess ? `${plan}${r.plus_trial_eligible ? '/可Plus试用' : ''}` : '';
+    const lastPlan = hasLastSuccess ? `${plan}${promoSummaries.length ? `（${promoSummaries.join('；')}）` : ''}` : '';
     const lastText = lastPlan ? `（上次: ${lastPlan}）` : '';
     const lastTitle = hasLastSuccess ? `上次成功: ${esc(r.plan_last_success_at)}` : '';
     return `<div class="extract-link-cell"><span class="pill status-failed" title="${[esc(reason), lastTitle].filter(Boolean).join('；')}">查询失败${esc(lastText)}</span><div class="extract-link-error" title="${esc(reason)}">${esc(reason)}</div></div>`;
@@ -3541,14 +3612,11 @@ function _planCell(r) {
     if (!checkedOk) {
       return `<span class="pill status-running" title="${title}">${esc(plan)}（待查资格）</span>`;
     }
-    const trialDiscount = r.plus_trial_discount_percentage != null && r.plus_trial_discount_percentage !== '' ? ` ${r.plus_trial_discount_percentage}%折扣` : '';
-    const text = r.plus_trial_eligible ? `free(可Plus试用${trialDiscount})` : 'free';
-    const cls = r.plus_trial_eligible ? 'status-success' : 'status-used';
-    const t = r.plus_trial_eligible ? `${title}；Plus 试用资格可用` : title;
-    const campaigns = (r.eligible_promo_campaigns && typeof r.eligible_promo_campaigns === 'object') ? r.eligible_promo_campaigns : {};
+    const cls = promoSummaries.length ? 'status-success' : 'status-used';
+    const t = promoSummaries.length ? `${title}；可用套餐优惠：${promoSummaries.join('；')}` : title;
     const keys = Object.keys(campaigns);
     const detailBtn = keys.length ? `<button type="button" class="promo-detail-btn" data-promo-details="${esc(JSON.stringify(campaigns))}">详情(${keys.length})</button>` : '';
-    return `<span class="pill ${cls}" title="${t}">${esc(text)}</span>${detailBtn}`;
+    return _promoStackHtml('free', cls, promoSummaries, t, detailBtn);
   }
 
   const cls = 'status-success';
@@ -3567,7 +3635,7 @@ function _planCell(r) {
   if (r.plan_renews_at) detail.push(`续费时间: ${r.plan_renews_at}`);
   if (r.discount_expires_at) detail.push(`折扣结束: ${r.discount_expires_at}`);
   if (r.discount_promo_campaign_id) detail.push(`优惠: ${r.discount_promo_campaign_id}`);
-  return `<span class="pill ${cls}" title="${esc(detail.join('；'))}">${esc(text)}</span>`;
+  return _promoStackHtml(text, cls, promoSummaries, detail.join('；'));
 }
 function _planAction(r) {
   if (['queued','running'].includes(r.plan_check_status)) {
@@ -3656,6 +3724,7 @@ function _accountsV2MoreMenu(r) {
     `<button type="button" onclick="checkSelectedLive([Number('${esc(r.id)}')], this); return false;" title="重新登录该账号，成功则刷新最新 AT/accessToken">查活刷新AT</button>`,
     `<button type="button" data-account-live-log="${esc(r.email)}" title="查看该账号最近一次查活日志">查活日志</button>`,
     `<button type="button" data-account-totp-log="${esc(r.email)}" title="查看该账号最近一次 2FA 设置日志">2FA日志</button>`,
+    _chatgptPasswordAction(r),
     _planAction(r),
     _extractLinkAction(r),
     _codexAction(r),
@@ -3820,10 +3889,24 @@ async function pollLiveLog() {
 $('#btnCloseLiveLog').addEventListener('click', closeLiveLogModal);
 
 // ---------- 2FA日志面板 ----------
-let totpLogEmail = null, totpLogTimer = null;
+let totpLogEmail = null, totpLogTimer = null, totpLogKind = 'totp';
 
 function openTotpLog(email) {
+  totpLogKind = 'totp';
+  $('#totpLogTitle').textContent = '2FA日志';
   totpLogEmail = email;
+  $('#totpLogEmail').textContent = email;
+  $('#totpLogPanel').classList.remove('hidden');
+  updateModalScrollLock();
+  $('#totpLogContent').textContent = '加载中…';
+  pollTotpLog();
+  clearInterval(totpLogTimer);
+  totpLogTimer = setInterval(pollTotpLog, 5000);
+}
+function openChatgptPasswordLog(email) {
+  totpLogKind = 'chatgpt-password';
+  totpLogEmail = email;
+  $('#totpLogTitle').textContent = 'ChatGPT密码日志';
   $('#totpLogEmail').textContent = email;
   $('#totpLogPanel').classList.remove('hidden');
   updateModalScrollLock();
@@ -3835,7 +3918,8 @@ function openTotpLog(email) {
 async function pollTotpLog() {
   if (!totpLogEmail) return;
   try {
-    const r = await api(`/api/accounts/totp-setup-log?email=${encodeURIComponent(totpLogEmail)}`);
+    const endpoint = totpLogKind === 'chatgpt-password' ? '/api/accounts/chatgpt-password-log' : '/api/accounts/totp-setup-log';
+    const r = await api(`${endpoint}?email=${encodeURIComponent(totpLogEmail)}`);
     const c = $('#totpLogContent');
     const atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 30;
     c.textContent = r.log || '(暂无日志，等待任务写入…)';
@@ -3852,6 +3936,7 @@ function closeTotpLogModal() {
   clearInterval(totpLogTimer);
   totpLogTimer = null;
   totpLogEmail = null;
+  totpLogKind = 'totp';
 }
 $('#btnCloseTotpLog').addEventListener('click', closeTotpLogModal);
 
@@ -3973,6 +4058,11 @@ async function onAccountsBodyClick(e) {
     openTotpLog(totpLogBtn.dataset.accountTotpLog);
     return;
   }
+  const passwordLogBtn = e.target.closest('[data-account-chatgpt-password-log]');
+  if (passwordLogBtn) {
+    openChatgptPasswordLog(passwordLogBtn.dataset.accountChatgptPasswordLog);
+    return;
+  }
 
   const delBtn = e.target.closest('[data-account-delete]');
   if (delBtn) {
@@ -4013,6 +4103,11 @@ async function onAccountsBodyClick(e) {
   const totpBtn = e.target.closest('[data-account-totp-setup]');
   if (totpBtn) {
     await setupAccountTotp(Number(totpBtn.dataset.accountTotpSetup), totpBtn);
+    return;
+  }
+  const passwordBtn = e.target.closest('[data-account-chatgpt-password]');
+  if (passwordBtn) {
+    await setAccountChatgptPassword(Number(passwordBtn.dataset.accountChatgptPassword), passwordBtn);
     return;
   }
 
@@ -4239,6 +4334,14 @@ async function refreshAccountsList(btn) {
   if (plusTrialV2) plusTrialV2.addEventListener('click', () => {
     applyAccountsPlusTrialFilter(!SHOW_PLUS_TRIAL_ACCOUNTS_ONLY);
   });
+  const promoTypeV2 = $('#promoTypeFilterV2');
+  if (promoTypeV2) promoTypeV2.addEventListener('change', () => {
+    applyAccountsPlusTrialFilter(true);
+  });
+  const promoDiscountV2 = $('#promoDiscountFilterV2');
+  if (promoDiscountV2) promoDiscountV2.addEventListener('change', () => {
+    applyAccountsPlusTrialFilter(true);
+  });
   const freeV2 = $('#showFreeAccountsOnlyV2');
   if (freeV2) freeV2.addEventListener('click', () => {
     applyAccountsFreeFilter(!SHOW_FREE_ACCOUNTS_ONLY);
@@ -4290,6 +4393,39 @@ async function showAccountTotpCode(id, btn) {
   }
 }
 
+async function setAccountChatgptPassword(id, btn) {
+  const acc = ACCOUNTS.find(item => Number(item.id) === Number(id));
+  const email = acc?.email || '';
+  if (!acc?.has_access_token || acc.password) {
+    showToast(acc?.password ? '该账号已有 ChatGPT 密码' : '该账号没有 access_token');
+    return;
+  }
+  const password = window.prompt('请输入 ChatGPT 新密码（12-128 位，含大小写字母、数字和符号）：');
+  if (password === null) return;
+  const confirmation = window.prompt('请再次输入 ChatGPT 新密码：');
+  if (confirmation === null) return;
+  if (!password || password !== confirmation) {
+    showToast('两次输入的 ChatGPT 密码不一致');
+    return;
+  }
+  if (!window.confirm(`确定为该账号设置 ChatGPT 密码？\n\n${email}\n\n邮箱验证码验证成功后才会提交密码。`)) return;
+  if (btn) btn.disabled = true;
+  try {
+    const result = await api(`/api/accounts/${encodeURIComponent(id)}/chatgpt-password`, {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({password, password_confirmation: confirmation}),
+    });
+    showToast(result.message || 'ChatGPT 密码设置已入队');
+    planStatusRevision = '';
+    await loadAccounts();
+    await pollAccountPlanStatuses();
+  } catch (e) {
+    showToast(e.message || 'ChatGPT 密码设置失败');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
 async function setupAccountTotp(id, btn) {
   const acc = ACCOUNTS.find(a => Number(a.id) === Number(id));
   const email = acc?.email || '';
