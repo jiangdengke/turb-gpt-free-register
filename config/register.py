@@ -10,12 +10,16 @@ from config.env_loader import apply_env_overrides
 # 注册邮箱（留空 + USE_EMAIL_SERVICE=True 时从 Outlook 池领取）
 REGISTER_EMAIL = ""
 
-# 注册密码（OTP-only 流程已不需要，留作备用）
+# 注册密码（protocol/浏览器注册会优先使用；留空时自动生成强密码）
 REGISTER_PASSWORD = ""
 
 # 用户名（注册完成后设置的显示名称，留空会自动生成 "Foo Bar" 形式）
 # OpenAI 限制：name_invalid_chars —— 只允许字母和空格
 REGISTER_NAME = ""
+
+# 注册成功后自动补设 ChatGPT 密码：仅用于仍未在注册阶段设置密码的驱动
+# protocol 注册若已写入 registration_password，会自动跳过此后置任务。
+AUTO_CHATGPT_PASSWORD_AFTER_REGISTER = True
 
 # 注册成功落库后是否自动查询套餐/Plus 资格。
 # 关闭后不会在注册完成后立刻访问 backend-api/accounts/check，后续可在账号列表手动查询。
@@ -29,6 +33,7 @@ POST_REGISTER_DWELL_SECONDS_RANGE = "5,15"
 apply_env_overrides(globals(), {
     'REGISTER_EMAIL': 'str',
     'REGISTER_NAME': 'str',
+    'AUTO_CHATGPT_PASSWORD_AFTER_REGISTER': 'bool',
     'AUTO_PLAN_CHECK_AFTER_REGISTER': 'bool',
     'POST_REGISTER_DWELL_SECONDS_RANGE': 'str',
 })

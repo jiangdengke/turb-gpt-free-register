@@ -14,7 +14,7 @@ import random
 import time
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlparse
 
 import pyotp
 
@@ -22,6 +22,17 @@ from core.session import BrowserSession
 from core.humanize import delay as human_delay
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url_for_log(value: object) -> str:
+    """Keep OAuth codes, state, and other query values out of logs."""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        return parsed.path or "<empty>"
+    except Exception:
+        return "<invalid-url>"
 
 
 def _clear_twofa_session_circuit(
@@ -88,8 +99,8 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
             retryable = _is_retryable_reauth_error(exc)
             if attempt >= max_attempts or not retryable:
                 logger.warning(
-                    "[2FA] 重认证发起失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
-                    attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
+                    "[2FA] 重认证发起失败且不再重试：attempt=%s/%s retryable=%s error=%s",
+                    attempt, max_attempts, retryable, type(exc).__name__,
                 )
                 raise
 
@@ -97,8 +108,8 @@ def _trigger_reauth_with_retry(session: BrowserSession, email: str) -> str:
             _clear_twofa_session_circuit(session, source="重认证请求")
             delay = min(120.0, base_delay * (2 ** (attempt - 1)))
             logger.warning(
-                "[2FA] 重认证发起临时失败：attempt=%s/%s error=%s: %s；%.1fs 后重试",
-                attempt, max_attempts, type(exc).__name__, str(exc)[:200], delay,
+                "[2FA] 重认证发起临时失败：attempt=%s/%s error=%s；%.1fs 后重试",
+                attempt, max_attempts, type(exc).__name__, delay,
             )
             if delay > 0:
                 time.sleep(delay)
@@ -133,8 +144,8 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
             retryable = _is_retryable_reauth_error(exc)
             if attempt >= max_attempts or not retryable:
                 logger.warning(
-                    "[2FA] authorize 导航失败且不再重试：attempt=%s/%s retryable=%s error=%s: %s",
-                    attempt, max_attempts, retryable, type(exc).__name__, str(exc)[:200],
+                    "[2FA] authorize 导航失败且不再重试：attempt=%s/%s retryable=%s error=%s",
+                    attempt, max_attempts, retryable, type(exc).__name__,
                 )
                 raise
 
@@ -143,9 +154,9 @@ def _follow_reauth_with_retry(session: BrowserSession, auth_url: str) -> str:
             _clear_twofa_session_circuit(session, source="authorize 导航")
             delay = min(120.0, base_delay * (2 ** (attempt - 1)))
             logger.warning(
-                "[2FA] authorize 导航临时失败：attempt=%s/%s error=%s: %s；"
+                "[2FA] authorize 导航临时失败：attempt=%s/%s error=%s；"
                 "%.1fs 后复用 CF Cookie 重试",
-                attempt, max_attempts, type(exc).__name__, str(exc)[:200], delay,
+                attempt, max_attempts, type(exc).__name__, delay,
             )
             if delay > 0:
                 time.sleep(delay)
@@ -173,7 +184,7 @@ def _warm_auth_document_for_reauth(session: BrowserSession) -> None:
                 return
             logger.info("[2FA] Auth document 预热返回 HTTP %s，保留响应 Cookie", status)
         except Exception as exc:
-            logger.debug("[2FA] Auth document 预热异常：%s: %s", type(exc).__name__, str(exc)[:160])
+            logger.debug("[2FA] Auth document 预热异常：%s", type(exc).__name__)
         _clear_twofa_session_circuit(session, source="Auth document 预热")
         if attempt < 2:
             time.sleep(float(attempt))
@@ -294,6 +305,123 @@ def _append_batch_archive(
     return None
 
 
+def _queue_registration_chatgpt_password(
+    *,
+    account_id: int,
+    email: str,
+    access_token: str,
+    email_source: str | None,
+    proxy_used: str | None,
+    extra: dict,
+    auto_twofa: bool,
+    totp_secret: str | None,
+) -> None:
+    """Queue a fallback password operation for registrations without a password.
+
+    A protocol or browser-driven registration may already have a real ChatGPT
+    password in ``extra``. In that case no second password is generated. The
+    fallback is retained for drivers that completed an OTP-only registration.
+    """
+    from config import register as _register_cfg
+
+    auto_password = bool(getattr(_register_cfg, "AUTO_CHATGPT_PASSWORD_AFTER_REGISTER", True))
+    existing_password = str(extra.get("registration_password") or "").strip()
+    password_needed = auto_password and not existing_password
+    if not auto_password:
+        logger.info("[ChatGPT密码] 注册后自动设置已关闭: id=%s", account_id)
+    elif existing_password:
+        logger.info("[ChatGPT密码] 注册流程已有 ChatGPT 密码，跳过自动设置: id=%s", account_id)
+
+    generated_password: str | None = None
+    if password_needed:
+        from core.chatgpt_password_service import (
+            enqueue_account_chatgpt_password,
+            generate_strong_password,
+        )
+
+        generated_password = generate_strong_password()
+
+    def _enqueue_after_twofa(_twofa_result: dict | None = None) -> None:
+        if not password_needed or generated_password is None:
+            return
+        from core import db
+
+        latest = db.get_account(int(account_id)) or {}
+        latest_token = str(latest.get("access_token") or access_token or "").strip()
+        queued = enqueue_account_chatgpt_password(
+            account_id=int(account_id),
+            email=email,
+            password=generated_password,
+            access_token=latest_token,
+            email_source=email_source,
+            trigger="registration_auto",
+            proxy=proxy_used,
+        )
+        if queued.get("accepted"):
+            logger.info("[ChatGPT密码] 注册后自动设置已入队: id=%s", account_id)
+        elif queued.get("busy"):
+            logger.info("[ChatGPT密码] 账号已有密码任务，注册流程不重复入队: id=%s", account_id)
+        else:
+            logger.warning(
+                "[ChatGPT密码] 注册后自动设置入队失败（不影响注册结果）: id=%s error=%s",
+                account_id,
+                queued.get("error"),
+            )
+
+    if auto_twofa and not str(totp_secret or "").strip():
+        try:
+            from core.twofa_service import enqueue_account_totp_setup
+
+            twofa_result = enqueue_account_totp_setup(
+                account_id=int(account_id),
+                email=email,
+                access_token=access_token,
+                trigger="registration_auto",
+                proxy=proxy_used,
+                on_complete=_enqueue_after_twofa if password_needed else None,
+            )
+            if twofa_result.get("accepted"):
+                if password_needed:
+                    logger.info("[ChatGPT密码] 等待注册后 2FA 完成后再入队: id=%s", account_id)
+                else:
+                    logger.info("[2FA] 注册后自动设置已入队: id=%s", account_id)
+                return
+            if twofa_result.get("busy"):
+                logger.warning(
+                    "[ChatGPT密码] 2FA 任务已存在，无法建立自动串行回调: id=%s",
+                    account_id,
+                )
+                return
+            if password_needed:
+                logger.warning(
+                    "[2FA] 注册后自动设置入队失败，将继续尝试 ChatGPT 密码: id=%s error=%s",
+                    account_id,
+                    twofa_result.get("error"),
+                )
+            else:
+                logger.warning(
+                    "[2FA] 注册后自动设置入队失败（不影响注册结果）: id=%s error=%s",
+                    account_id,
+                    twofa_result.get("error"),
+                )
+        except Exception as exc:
+            if password_needed:
+                logger.warning(
+                    "[2FA] 注册后自动设置异常，将继续尝试 ChatGPT 密码: id=%s error=%s",
+                    account_id,
+                    type(exc).__name__,
+                )
+            else:
+                logger.warning(
+                    "[2FA] 注册后自动设置异常（不影响注册结果）: id=%s error=%s",
+                    account_id,
+                    type(exc).__name__,
+                )
+
+    _enqueue_after_twofa()
+
+
+
 def follow_oauth_callback(session: BrowserSession, continue_url: str, referer: str = "https://auth.openai.com/about-you") -> str:
     """
     步骤12.5: 跟随 create_account 返回的 continue_url，完成 OAuth 回调。
@@ -330,7 +458,7 @@ def follow_oauth_callback(session: BrowserSession, continue_url: str, referer: s
     log_cookies = getattr(session, "log_cookie_names", None)
     if callable(log_cookies):
         log_cookies("oauth_callback_complete")
-    logger.info(f"[OAuth回调] 完成, 最终落点: {resp.url}")
+    logger.info("[OAuth回调] 完成, 最终落点: %s", _safe_url_for_log(resp.url))
     return resp.url
 
 
@@ -355,7 +483,7 @@ def fetch_session(session: BrowserSession) -> dict:
     data = resp.json()
 
     if not data.get("accessToken"):
-        logger.error(f"[Session] 响应中没有 accessToken: {data}")
+        logger.error("[Session] 响应中没有 accessToken")
         raise RuntimeError("未拿到 accessToken，登录态可能未建立")
 
     user = data.get("user") or {}
@@ -377,7 +505,7 @@ def _trigger_reauth(session: BrowserSession, email: str) -> str:
     csrf_resp = session.get(csrf_url, headers=session.get_nextauth_headers(referer="https://chatgpt.com/"))
     csrf_resp.raise_for_status()
     csrf_token = csrf_resp.json()["csrfToken"]
-    logger.info(f"[2FA] 重认证 CSRF: {csrf_token[:20]}...")
+    logger.info("[2FA] 重认证 CSRF 获取成功")
 
     # POST /api/auth/signin/openai 带 reauth 参数
     query = {
@@ -417,7 +545,7 @@ def _follow_reauth(session: BrowserSession, auth_url: str) -> str:
     logger.info("[2FA] 跟随 authorize URL，触发 OTP 发送...")
     resp = session.get(auth_url, headers=headers, allow_redirects=True)
     resp.raise_for_status()
-    logger.info(f"[2FA] 落点 URL: {resp.url}")
+    logger.info("[2FA] 落点 URL: %s", _safe_url_for_log(resp.url))
     return str(getattr(resp, "url", "") or "")
 
 
@@ -430,7 +558,7 @@ def _validate_reauth_otp(session: BrowserSession, code: str) -> str:
     headers = session.get_auth_headers(referer="https://auth.openai.com/email-verification")
     body = json.dumps({"code": code})
 
-    logger.info(f"[2FA] 提交重认证 OTP: {code}")
+    logger.info("[2FA] 提交重认证 OTP")
     resp = session.post(url, headers=headers, data=body)
     resp.raise_for_status()
     data = resp.json()
@@ -452,7 +580,7 @@ def _exchange_new_token(session: BrowserSession, continue_url: str) -> str:
     # 拿新的 accessToken
     new_session = fetch_session(session)
     new_token = new_session["accessToken"]
-    logger.info(f"[2FA] 新 accessToken（含新鲜 pwd_auth_time）: {new_token[:40]}...")
+    logger.info("[2FA] 新 accessToken（含新鲜 pwd_auth_time）已获取")
     return new_token
 
 
@@ -478,7 +606,7 @@ def _enroll_totp(session: BrowserSession, access_token: str) -> tuple[str, str]:
     session_id = data.get("session_id")
     if not secret or not session_id:
         raise RuntimeError(f"enroll 响应字段缺失: {data}")
-    logger.info(f"[2FA] TOTP secret 已获取: {secret[:4]}...{secret[-4:]}")
+    logger.info("[2FA] TOTP secret 已获取")
     return secret, session_id
 
 
@@ -504,7 +632,7 @@ def _activate_totp(
         "session_id": session_id,
     })
 
-    logger.info(f"[2FA] 激活 enrollment, code={totp_code}")
+    logger.info("[2FA] 激活 enrollment")
     resp = session.post(url, headers=headers, data=body)
     if resp.status_code != 200:
         logger.error(f"[2FA] activate 失败 {resp.status_code}: {resp.text}")
@@ -553,7 +681,7 @@ def setup_2fa(
             human_delay("navigate")
             logger.info("[2FA] accessToken 预热完成")
         except Exception as exc:
-            logger.warning("[2FA] accessToken 预热失败，继续按重认证流程执行：%s: %s", type(exc).__name__, str(exc)[:180])
+            logger.warning("[2FA] accessToken 预热失败，继续按重认证流程执行：%s", type(exc).__name__)
         finally:
             # authenticated_bootstrap(strict=False) 是可选预热。其非关键接口返回
             # 403 时会开启会话级熔断，若不清理，下一步 CSRF 请求甚至不会发出。
@@ -628,12 +756,12 @@ def setup_2fa(
             settle_seconds=retry_settle,
         )
         if fresh_otp == otp_code:
-            logger.warning("[2FA] 重试仍获取到相同 OTP=%s，继续提交以保留原始错误信息", fresh_otp)
+            logger.warning("[2FA] 重试仍获取到相同 OTP，继续提交以保留原始错误信息")
         else:
-            logger.info("[2FA] 已获取新的 OTP=%s，替换首次候选", fresh_otp)
+            logger.info("[2FA] 已获取新的 OTP，替换首次候选")
         otp_code = fresh_otp
         continue_url = _validate_reauth_otp(session, otp_code)
-    logger.info("[2FA] 邮箱重认证 OTP 验证通过，continue_url=%s", continue_url)
+    logger.info("[2FA] 邮箱重认证 OTP 验证通过，continue_url=%s", _safe_url_for_log(continue_url))
     human_delay("api")
     logger.info("[2FA] 正在交换新 token...")
     new_token = _exchange_new_token(session, continue_url)
@@ -643,7 +771,7 @@ def setup_2fa(
     # 阶段二：enroll + activate
     logger.info("[2FA] 阶段2：开始 enroll TOTP")
     secret, session_id = _enroll_totp(session, new_token)
-    logger.info("[2FA] enroll 成功，session_id=%s", session_id)
+    logger.info("[2FA] enroll 成功")
     human_delay("form")
     logger.info("[2FA] 正在激活 TOTP enrollment")
     _activate_totp(session, new_token, secret, session_id)
@@ -735,28 +863,16 @@ def save_account_data(
         auto_twofa = bool(getattr(_twofa_cfg, "ENABLE_2FA", False))
     except Exception:
         auto_twofa = False
-    if auto_twofa and not str(totp_secret or "").strip():
-        try:
-            from core.twofa_service import enqueue_account_totp_setup
-
-            queued = enqueue_account_totp_setup(
-                account_id=row_id,
-                email=email,
-                access_token=access_token,
-                trigger="registration_auto",
-                proxy=proxy_used,
-            )
-            if queued.get("accepted"):
-                logger.info(f"[2FA] 注册后自动开启 2FA 已入队: id={row_id}, email={email}")
-            elif queued.get("busy"):
-                logger.info(f"[2FA] 账号已有 2FA 任务，注册流程不重复入队: id={row_id}, email={email}")
-            else:
-                logger.warning(f"[2FA] 注册后自动开启 2FA 入队失败（不影响注册结果）: {email}, {queued.get('error')}")
-        except Exception as exc:
-            logger.warning(
-                f"[2FA] 注册后自动开启 2FA 入队异常（不影响注册结果）: "
-                f"{email}, {type(exc).__name__}: {str(exc)[:180]}"
-            )
+    _queue_registration_chatgpt_password(
+        account_id=row_id,
+        email=email,
+        access_token=access_token,
+        email_source=email_source,
+        proxy_used=proxy_used,
+        extra=extra,
+        auto_twofa=auto_twofa,
+        totp_secret=totp_secret,
+    )
 
     if auto_plan_check is None:
         try:

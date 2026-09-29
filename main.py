@@ -28,6 +28,11 @@ from core.openai_auth import (
     network_preflight,
     _is_retryable_authorize_error,
     navigate_about_you,
+    navigate_create_account_password,
+    navigate_email_otp_send,
+    request_password_sentinel_bundle,
+    generate_registration_password,
+    register_user,
     EmailOtpInvalidError,
     create_account,
 )
@@ -174,7 +179,7 @@ def _run_pre_otp_authorization_with_session_rotation(
     session: BrowserSession,
     requested_proxy: str | None,
     email: str,
-) -> BrowserSession:
+) -> tuple[BrowserSession, str]:
     """在 OTP 触发前完成登录页到 authorize 的链路，并支持整链重启。
 
     ``follow_authorize`` 自身只会在当前 Cookie/会话内重试。若 auth.openai.com
@@ -194,14 +199,14 @@ def _run_pre_otp_authorization_with_session_rotation(
                 email,
                 max_attempts=1,
             )
-            follow_authorize(session, authorize_url)
+            authorize_final_url = follow_authorize(session, authorize_url)
             if attempt > 1:
                 logger.info(
                     "[认证] 重建会话后 authorize 成功 (%s/%s)",
                     attempt,
                     max_attempts,
                 )
-            return session
+            return session, authorize_final_url
         except Exception as exc:
             if attempt >= max_attempts or not _is_retryable_authorize_error(exc):
                 raise
@@ -236,7 +241,7 @@ def _run_pre_otp_authorization_with_direct_fallback(
     session: BrowserSession,
     requested_proxy: str | None,
     email: str,
-) -> BrowserSession:
+) -> tuple[BrowserSession, str]:
     """Optionally switch a pool-proxy failure to direct networking before OTP."""
     try:
         return _run_pre_otp_authorization_with_session_rotation(
@@ -403,11 +408,10 @@ def run_registration(
     on_email_acquired: Callable[[str], None] | None = None,
 ):
     """
-    执行完整的 ChatGPT 注册流程（OTP-only，无密码）。
+    执行完整的 ChatGPT 邮箱密码注册流程。
 
-    OpenAI 当前默认流程：signin 时携带 login_hint+screen_hint=login_or_signup
-    → follow_authorize 重定向链自动落到 /email-verification 并触发 OTP 发送
-    → 用户输入验证码 → validate_email_otp → about-you 提交昵称生日 → 完成。
+    OpenAI 当前协议流程：signin → authorize → create-account/password 提交密码
+    → 发送并验证邮箱 OTP → about-you 提交昵称生日 → 完成。
 
     Args:
         email: 注册邮箱
@@ -507,21 +511,43 @@ def run_registration(
     logger.debug(f"[注册] 设备ID={session.device_id}，会话日志ID={session.auth_session_logging_id}")
 
     create_acknowledged = False
+    registration_password = None
     try:
         # 网络预检、bootstrap、providers、CSRF、signin、authorize 必须作为一个完整前置链路；
         # OTP 尚未可靠触发时，任一可重试 403 都可以安全换会话重来。
-        session = _run_pre_otp_authorization_with_direct_fallback(
+        session, authorize_final_url = _run_pre_otp_authorization_with_direct_fallback(
             session,
             proxy,
             email,
         )
 
-        # 记录"OTP 触发"前的时间戳，自动取信箱时只看此后的邮件，
-        # 避免取到上次注册留下的旧 OTP。
-        otp_after_ts = time.time()
+        # 协议注册必须先走密码页，再提交 user/register；否则会创建无密码账号。
+        if not authorize_final_url:
+            raise RuntimeError("authorize 导航未返回最终 URL，无法进入注册密码页")
+        navigate_create_account_password(session, authorize_final_url)
+        human_delay("navigate")
 
-        # ==================== 阶段2: OpenAI Auth ====================
-        # 步骤4 已在上面的 OTP 前完整链路中完成，下面直接进入验证码验证阶段。
+        registration_password = generate_registration_password()
+        password_sentinel = request_password_sentinel_bundle(session)
+        password_sentinel_header, password_so_header = build_sentinel_header(
+            session,
+            password_sentinel,
+            "username_password_create",
+        )
+        human_delay("challenge")
+        register_result = register_user(
+            session,
+            email,
+            registration_password,
+            password_sentinel_header,
+            password_so_header,
+        )
+        # user/register 已接受邮箱+密码；后续 OTP/资料页失败时不能再回收邮箱。
+        create_acknowledged = True
+
+        # 只读取 user/register 之后到达的验证码，避免误取历史邮件。
+        otp_after_ts = time.time()
+        navigate_email_otp_send(session, register_result.get("continue_url"))
         human_delay("navigate")
 
         # ==================== 阶段3: 验证码验证 ====================
@@ -723,6 +749,7 @@ def run_registration(
                 "device_id": session.device_id,
                 "sentinel_sid": getattr(session, "sentinel_sid", None),
                 "browser_profile": getattr(session, "browser_profile", None),
+                "registration_password": registration_password,
                 "codex": codex_result,
             },
         )

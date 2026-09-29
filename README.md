@@ -759,30 +759,25 @@ python tools/test_codex_oauth.py --email <已注册邮箱> --verbose
 
 ## 注册密码说明
 
-Roxy 注册如果遇到新版流程：
+`protocol` 注册会强制走邮箱+密码注册协议：
+
+```text
+authorize → /create-account/password → POST /api/accounts/user/register
+→ 邮箱 OTP → about-you → POST /api/accounts/create_account
+```
+
+密码优先使用 `config/register.py` 中的 `REGISTER_PASSWORD`；留空时自动生成
+独立强密码，并在注册账号最终保存时写入 `extra_json.registration_password`。
+
+Roxy、Cloak、Browser Use 等浏览器驱动如果进入新版流程：
 
 ```text
 /create-account/password
 ```
 
-会自动设置密码。
+也会在注册阶段填写并保存密码。只有仍以 OTP-only 方式完成注册、且没有密码的驱动，才使用注册后的补设密码任务。
 
-密码来源：
-
-1. 优先使用 `config/register.py`：
-
-```python
-REGISTER_PASSWORD = "你的固定密码"
-```
-
-2. 如果为空，自动生成 14 位强密码，包含大写、小写、数字、符号。
-
-保存位置：
-
-- 账号 `extra_json.registration_password`
-- SQLite `accounts.payload` 中的 `extra_json.registration_password`
-
-注意：账号表里的 `password` 字段仍用于 Outlook 邮箱素材密码，不会被 OpenAI 注册密码覆盖。
+注意：账号表里的 `password` 字段仍用于邮箱素材密码，不会被 ChatGPT 注册密码覆盖。
 
 ---
 

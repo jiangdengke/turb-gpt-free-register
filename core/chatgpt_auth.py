@@ -14,6 +14,18 @@ from config import (
 
 logger = logging.getLogger(__name__)
 
+
+def _safe_url_for_log(value: object) -> str:
+    """Keep OAuth state, codes, and query tokens out of logs."""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        return parsed.path or "<empty>"
+    except Exception:
+        return "<invalid-url>"
+
+
 # 2026-09-14 Roxy 成功样本：signin 不再主动携带 passkey capabilities；
 # authorize 使用两个 ccaps，并明确返回 ChatGPT 首页。
 _CC_CAPS = "login_methods chatgpt_login_finalizer_v1"
@@ -58,11 +70,7 @@ def _ensure_authorize_context(authorize_url: str, session: BrowserSession, email
                 changed = True
         if not changed:
             return authorize_url
-        logger.info(
-            "[步骤3] authorize 上下文已对齐：ui_locales=%s oai-did=%s",
-            ui_locale,
-            str(session.device_id)[:12] + "...",
-        )
+        logger.info("[步骤3] authorize 上下文已对齐：ui_locales=%s", ui_locale)
         return parsed._replace(query=urlencode(params, doseq=True)).geturl()
     except Exception:
         return authorize_url
@@ -144,7 +152,7 @@ def get_csrf_token(session: BrowserSession) -> str:
 
     data = resp.json()
     csrf_token = data.get("csrfToken", "")
-    logger.info(f"[步骤2] 获取 CSRF Token 成功: {csrf_token[:20]}...")
+    logger.info("[步骤2] 获取 CSRF Token 成功")
     return csrf_token
 
 
@@ -211,5 +219,5 @@ def signin_openai(session: BrowserSession, csrf_token: str, email: str) -> str:
 
     authorize_url = _ensure_authorize_context(authorize_url, session, email)
     logger.info("[步骤3] 获取 authorize URL 成功，已确认 login_or_signup/oai-did 上下文")
-    logger.debug(f"[步骤3] URL: {authorize_url[:160]}...")
+    logger.debug("[步骤3] authorize URL 路径: %s", _safe_url_for_log(authorize_url))
     return authorize_url

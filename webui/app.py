@@ -117,7 +117,7 @@ def _compact_account_for_list(row: dict) -> dict:
         "plan_type", "current_plan_type", "plus_trial_eligible",
         "eligible_promo_campaigns", "plus_trial_discount_percentage",
         "plan_check_status", "codex_status", "codex_agent_status",
-        "totp_setup_status",
+        "totp_setup_status", "chatgpt_password_status",
     ):
         if key in row:
             out[key] = row.get(key)
@@ -143,6 +143,7 @@ def _compact_account_for_list(row: dict) -> dict:
         "codex_error", "codex_agent_message", "codex_agent_runtime_id",
         "codex_agent_sub2api_url", "codex_agent_sub2api_mode", "codex_agent_sub2api_total",
         "totp_setup_error", "totp_setup_message", "totp_setup_started_at", "totp_setup_completed_at",
+        "chatgpt_password_error", "chatgpt_password_message", "chatgpt_password_started_at", "chatgpt_password_completed_at",
         "email_change_status", "email_change_error", "email_change_new_email",
         "email_change_started_at", "email_change_completed_at",
     )
@@ -338,6 +339,9 @@ def create_app(auth_code: str | None = None) -> Flask:
     recovered_totp_setups = db.recover_interrupted_totp_setups()
     if recovered_totp_setups:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的 2FA 状态", recovered_totp_setups)
+    recovered_chatgpt_passwords = db.recover_interrupted_chatgpt_passwords()
+    if recovered_chatgpt_passwords:
+        logger.warning("已恢复 %s 个因 WebUI 重启中断的 ChatGPT 密码设置状态", recovered_chatgpt_passwords)
     recovered_email_changes = db.recover_interrupted_email_changes()
     if recovered_email_changes:
         logger.warning("已恢复 %s 个因 WebUI 重启中断的邮箱换绑状态", recovered_email_changes)
@@ -597,6 +601,54 @@ def create_app(auth_code: str | None = None) -> Flask:
         if not updated:
             return jsonify({"ok": False, "error": "账号不存在"}), 404
         return jsonify({"ok": True, "updated": True, "id": acc_id, "note": note})
+
+    @app.post("/api/accounts/<int:acc_id>/chatgpt-password")
+    def api_account_chatgpt_password(acc_id: int):
+        """排队设置已保存 ChatGPT 账号密码；密码不会出现在响应或日志中。"""
+        acc = db.get_account(acc_id)
+        if not acc:
+            return jsonify({"ok": False, "error": "账号不存在"}), 404
+        data = request.get_json(silent=True) or {}
+        password = data.get("password")
+        confirmation = data.get("password_confirmation", data.get("confirm_password"))
+        if not isinstance(password, str) or not password:
+            return jsonify({"ok": False, "error": "请输入 ChatGPT 新密码"}), 400
+        if confirmation is not None and password != confirmation:
+            return jsonify({"ok": False, "error": "两次输入的 ChatGPT 密码不一致"}), 400
+        try:
+            from core.db import _extract_registration_password
+            if _extract_registration_password(acc):
+                return jsonify({"ok": False, "error": "该账号已有 ChatGPT 密码，无需再次设置"}), 409
+        except Exception:
+            pass
+        token = str(acc.get("access_token") or "").strip()
+        if not token:
+            return jsonify({"ok": False, "error": "账号缺少 access_token，请先查活刷新 AT"}), 400
+        try:
+            from core import chatgpt_password_service
+            queued = chatgpt_password_service.enqueue_account_chatgpt_password(
+                account_id=acc_id,
+                email=str(acc.get("email") or ""),
+                password=password,
+                access_token=token,
+                email_source=str(acc.get("email_source") or "") or None,
+                trigger="manual",
+                proxy=str(acc.get("proxy_used") or "") or None,
+            )
+        except Exception as exc:
+            logger.error("ChatGPT 密码服务加载失败: account_id=%s error=%s", acc_id, type(exc).__name__)
+            return jsonify({"ok": False, "error": f"ChatGPT 密码服务加载失败：{type(exc).__name__}"}), 503
+        public = {key: value for key, value in queued.items() if key not in {"future", "password", "_password"}}
+        if queued.get("busy"):
+            return jsonify({"ok": False, **public}), 409
+        if not queued.get("accepted"):
+            return jsonify({"ok": False, **public}), 503
+        return jsonify({
+            "ok": True,
+            "started": True,
+            "queue": chatgpt_password_service.queue_settings(),
+            **public,
+        }), 202
 
     @app.post("/api/accounts/<int:acc_id>/totp-setup")
     def api_account_totp_setup(acc_id: int):
@@ -2458,6 +2510,24 @@ def create_app(auth_code: str | None = None) -> Flask:
             return jsonify({"ok": False, "error": "email 为空"}), 400
         p = account_liveness.log_path(email)
         data = _read_log_tail(p, max_bytes=80_000, running_fn=lambda: live_check_service.is_checking(email))
+        return jsonify(data)
+
+    @app.get("/api/accounts/chatgpt-password-log")
+    def api_account_chatgpt_password_log():
+        """读取某邮箱最近一次 ChatGPT 密码设置日志。?email=xxx"""
+        from core import chatgpt_password_service
+        email = (request.args.get("email") or "").strip()
+        if not email:
+            return jsonify({"ok": False, "error": "email 为空"}), 400
+        path = chatgpt_password_service.log_path(email)
+        data = _read_log_tail(path, max_bytes=80_000, running_fn=lambda: False)
+        try:
+            acc = db.get_account_by_email(email) or {}
+            data["running"] = bool(
+                str(acc.get("chatgpt_password_status") or "") in {"queued", "running"}
+            ) or chatgpt_password_service.is_running(int(acc.get("id") or 0))
+        except Exception:
+            pass
         return jsonify(data)
 
     @app.get("/api/accounts/totp-setup-log")

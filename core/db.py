@@ -1741,6 +1741,9 @@ def list_account_plan_check_statuses(
         "totp_setup_status", "totp_setup_ok", "totp_setup_error",
         "totp_setup_message", "totp_setup_trigger", "totp_setup_queued_at",
         "totp_setup_started_at", "totp_setup_completed_at", "totp_setup_checked_at",
+        "chatgpt_password_status", "chatgpt_password_ok", "chatgpt_password_error",
+        "chatgpt_password_message", "chatgpt_password_trigger", "chatgpt_password_queued_at",
+        "chatgpt_password_started_at", "chatgpt_password_completed_at", "chatgpt_password_checked_at",
         "original_email", "email_source", "email_change_status", "email_change_ok",
         "email_change_error", "email_change_new_email", "email_change_started_at", "email_change_completed_at",
     )
@@ -1806,6 +1809,13 @@ def list_account_plan_check_statuses(
                     "totp_setup_checked_at": row.get("totp_setup_checked_at"),
                     "totp_setup_started_at": row.get("totp_setup_started_at"),
                     "totp_setup_completed_at": row.get("totp_setup_completed_at"),
+                    "chatgpt_password_status": row.get("chatgpt_password_status"),
+                    "chatgpt_password_ok": row.get("chatgpt_password_ok"),
+                    "chatgpt_password_error": row.get("chatgpt_password_error"),
+                    "chatgpt_password_message": row.get("chatgpt_password_message"),
+                    "chatgpt_password_checked_at": row.get("chatgpt_password_checked_at"),
+                    "chatgpt_password_started_at": row.get("chatgpt_password_started_at"),
+                    "chatgpt_password_completed_at": row.get("chatgpt_password_completed_at"),
                     "totp_enabled": bool(str(row.get("totp_secret") or "").strip()),
                     "email": row.get("email"),
                     "original_email": row.get("original_email"),
@@ -2305,6 +2315,127 @@ def recover_interrupted_totp_setups() -> int:
             row["totp_setup_ok"] = False
             row["totp_setup_error"] = "WebUI 重启导致 2FA 设置中断，请重新开启"
             row["totp_setup_completed_at"] = now
+            row["updated_at"] = now
+            recovered += 1
+        if recovered:
+            _save_accounts(rows)
+        return recovered
+
+
+def claim_account_chatgpt_password(acc_id: int, trigger: str = "manual") -> bool:
+    """原子占用已保存账号的 ChatGPT 密码设置任务。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        current_status = row.get("chatgpt_password_status")
+        if current_status in {"queued", "running"}:
+            try:
+                stamp_key = (
+                    "chatgpt_password_queued_at"
+                    if current_status == "queued"
+                    else "chatgpt_password_started_at"
+                )
+                stale_after = (
+                    _PLAN_CHECK_QUEUE_STALE_SECONDS
+                    if current_status == "queued"
+                    else _PLAN_CHECK_STALE_SECONDS
+                )
+                started_at = datetime.fromisoformat(str(row.get(stamp_key) or ""))
+                if (datetime.now() - started_at).total_seconds() < stale_after:
+                    return False
+            except (TypeError, ValueError):
+                pass
+        now = _now()
+        row["chatgpt_password_status"] = "queued"
+        row["chatgpt_password_ok"] = False
+        row["chatgpt_password_trigger"] = str(trigger or "manual")
+        row["chatgpt_password_queued_at"] = now
+        row["chatgpt_password_started_at"] = None
+        row["chatgpt_password_completed_at"] = None
+        row["chatgpt_password_error"] = None
+        row["chatgpt_password_message"] = "已入队"
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def mark_account_chatgpt_password_running(acc_id: int) -> bool:
+    """把 ChatGPT 密码设置任务标记为运行中。"""
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None or row.get("chatgpt_password_status") not in {"queued", "running"}:
+            return False
+        now = _now()
+        row["chatgpt_password_status"] = "running"
+        row["chatgpt_password_started_at"] = now
+        row["chatgpt_password_error"] = None
+        row["chatgpt_password_message"] = "正在验证邮箱并设置 ChatGPT 密码"
+        row["updated_at"] = now
+        _save_accounts(rows)
+        return True
+
+
+def update_account_chatgpt_password(acc_id: int, result: dict | None = None) -> bool:
+    """写回 ChatGPT 密码设置状态；实际密码只保存到 registration_password。"""
+    result = result or {}
+    with _LOCK:
+        rows = _load_accounts()
+        row = next((r for r in rows if int(r.get("id") or 0) == int(acc_id)), None)
+        if row is None:
+            return False
+        status = str(result.get("status") or ("success" if result.get("ok") else "failed"))
+        ok = bool(result.get("ok")) and status == "success"
+        row["chatgpt_password_status"] = status
+        row["chatgpt_password_ok"] = ok
+        row["chatgpt_password_checked_at"] = result.get("checked_at") or _now()
+        if status in {"success", "failed", "stopped"}:
+            row["chatgpt_password_completed_at"] = _now()
+        row["chatgpt_password_error"] = None if ok or status == "running" else result.get("error")
+        if result.get("message") is not None:
+            row["chatgpt_password_message"] = result.get("message")
+
+        # 仅在最终接口成功后写入，避免 OTP 无效或 Sentinel 失败时产生半成品密码。
+        password = str(result.get("_password") or "").strip()
+        if ok and password:
+            extra_raw = row.get("extra_json")
+            if isinstance(extra_raw, str) and extra_raw.strip():
+                try:
+                    extra = json.loads(extra_raw)
+                except (TypeError, ValueError):
+                    extra = {}
+            elif isinstance(extra_raw, dict):
+                extra = dict(extra_raw)
+            else:
+                extra = {}
+            extra["registration_password"] = password
+            row["extra_json"] = json.dumps(extra, ensure_ascii=False)
+
+        if result.get("access_token"):
+            row["access_token"] = result.get("access_token")
+        if result.get("expires_at"):
+            row["expires_at"] = result.get("expires_at")
+        row["copy_line"] = _account_line(row)
+        row["updated_at"] = _now()
+        _save_accounts(rows)
+        return True
+
+
+def recover_interrupted_chatgpt_passwords() -> int:
+    """服务启动时恢复上次进程遗留的 ChatGPT 密码设置状态。"""
+    with _LOCK:
+        rows = _load_accounts()
+        recovered = 0
+        now = _now()
+        for row in rows:
+            if row.get("chatgpt_password_status") not in {"queued", "running"}:
+                continue
+            row["chatgpt_password_status"] = "failed"
+            row["chatgpt_password_ok"] = False
+            row["chatgpt_password_error"] = "WebUI 重启导致 ChatGPT 密码设置中断，请重新设置"
+            row["chatgpt_password_completed_at"] = now
             row["updated_at"] = now
             recovered += 1
         if recovered:

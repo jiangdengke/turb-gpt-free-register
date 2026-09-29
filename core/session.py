@@ -25,6 +25,19 @@ from config import (
 
 logger = logging.getLogger(__name__)
 _GEO_CACHE: dict[str, dict] = {}
+
+
+def _safe_url_for_log(value: object) -> str:
+    """Keep query values such as OAuth code/state out of request logs."""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        return parsed.path or "<empty>"
+    except Exception:
+        return "<invalid-url>"
+
+
 _GEO_CACHE_LOCK = threading.Lock()
 _CF_COOKIE_NAMES = ("cf_clearance", "__cf_bm", "__cfseq", "cf_chl_rc_i", "cf_chl_rc_ni", "cf_chl_rc_m")
 _COUNTRY_NAME_TO_CODE = {
@@ -327,7 +340,7 @@ class BrowserSession:
     def _observe_cf_cookie_changes(self, url: str) -> None:
         current = self.cf_cookie_snapshot()
         if current != getattr(self, "_cf_cookie_seen", {}):
-            logger.info("[CF] Cookie 状态更新 url=%s keys=%s", url, sorted(current.keys()))
+            logger.info("[CF] Cookie 状态更新 url=%s keys=%s", _safe_url_for_log(url), sorted(current.keys()))
             self._cf_cookie_seen = current
 
     def _enforce_proxy_quality(self) -> None:
@@ -766,8 +779,8 @@ class BrowserSession:
         retry_after = self._parse_retry_after(getattr(resp, "headers", {}).get("retry-after") if getattr(resp, "headers", None) else None)
         cool_down = retry_after if retry_after > 0 else (300 if status == 429 else 900)
         self.blocked_until = max(self.blocked_until, time.time() + min(cool_down, 3600))
-        self.blocked_reason = f"HTTP {status} from {url}"
-        logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), url)
+        self.blocked_reason = f"HTTP {status} from {_safe_url_for_log(url)}"
+        logger.warning("[熔断] 当前会话收到 HTTP %s，进入冷却 %ss，停止后续请求：%s", status, min(cool_down, 3600), _safe_url_for_log(url))
         return resp
 
     def get(self, url: str, headers: dict = None, **kwargs):

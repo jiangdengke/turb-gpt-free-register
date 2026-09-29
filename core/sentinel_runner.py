@@ -57,6 +57,7 @@ _FLOW_PAGE_URL = {
     "username_password_create": "https://auth.openai.com/create-account/password",
     "email_otp_validate": "https://auth.openai.com/email-verification",
     "authorize_continue": "https://auth.openai.com/email-verification",
+    "password_reset": "https://auth.openai.com/add-password/new-password",
     "oauth_create_account": "https://auth.openai.com/about-you",
 }
 
@@ -157,7 +158,8 @@ def generate_sentinel_token(
     # Auth 页面 Sentinel token 的 documentElement 通常没有 data-build；
     # ChatGPT 页面 prepare/finalize 的 p 才带前端 build。
     runner_build_id = "" if page_url is None and flow in {
-        "email_otp_validate", "authorize_continue", "oauth_create_account", "username_password_create"
+        "email_otp_validate", "authorize_continue", "oauth_create_account",
+        "password_reset", "username_password_create"
     } else build_id
     timezone_iana = str(profile.get("timezone_iana", TIMEZONE_IANA))
     timezone_name = str(profile.get("timezone_name", TIMEZONE_NAME))
@@ -249,8 +251,8 @@ def generate_sentinel_token(
             "--cookie", runner_cookie,
         ]
 
-        logger.info(f"[SentinelRunner] 调用 Node 生成 token, flow={flow}")
-        logger.debug(f"[SentinelRunner] 命令: {' '.join(cmd)}")
+        logger.info("[SentinelRunner] 调用 Node 生成 token, flow=%s", flow)
+        logger.debug("[SentinelRunner] Node 命令已准备，敏感参数不写入日志")
 
         # 关键：禁用 sentinel.config.json 自动发现（避免外部配置干扰）
         env = os.environ.copy()
@@ -279,18 +281,14 @@ def generate_sentinel_token(
             ) from exc
 
         if proc.returncode != 0:
-            stderr = (proc.stderr or "").strip()
-            stdout = (proc.stdout or "").strip()
             raise RuntimeError(
-                f"sentinel-runner.js 退出码 {proc.returncode}\n"
-                f"stderr: {stderr}\n"
-                f"stdout: {stdout}"
+                f"sentinel-runner.js 退出码 {proc.returncode}, flow={flow}"
             )
 
         token_text = (proc.stdout or "").strip()
         if not token_text:
             raise RuntimeError(
-                f"sentinel-runner.js 输出为空, stderr: {(proc.stderr or '').strip()}"
+                f"sentinel-runner.js 输出为空, flow={flow}"
             )
 
         # 简单合法性校验：必须是合法 JSON 且包含关键字段
@@ -298,13 +296,13 @@ def generate_sentinel_token(
             parsed = json.loads(token_text)
         except json.JSONDecodeError as exc:
             raise RuntimeError(
-                f"runner 输出不是合法 JSON: {token_text[:200]}"
+                f"runner 输出不是合法 JSON, flow={flow}"
             ) from exc
 
         for required_key in ("p", "c", "id", "flow"):
             if required_key not in parsed:
                 raise RuntimeError(
-                    f"runner 输出缺少字段 {required_key}: {token_text[:200]}"
+                    f"runner 输出缺少字段 {required_key}, flow={flow}"
                 )
 
         # 详细诊断：打印输出 JSON 的所有顶层字段名 + 值长度

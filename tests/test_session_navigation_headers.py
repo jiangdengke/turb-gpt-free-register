@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import unittest
+from unittest.mock import patch
 
 from config.browser import build_browser_environment
 from core.session import BrowserSession
@@ -63,6 +64,14 @@ class SessionNavigationHeaderTests(unittest.TestCase):
             "sec_ch_ua_platform": '"macOS"',
         }
         return session
+
+    def test_exit_geo_detection_uses_initialized_cache_without_network(self):
+        session = object.__new__(BrowserSession)
+        session.proxy = ""
+        session.session = None
+        with patch("config.browser.AUTO_BROWSER_LOCALE_FROM_IP", True), \
+                patch("config.browser.IP_GEO_ENDPOINTS", []):
+            self.assertEqual(session._detect_exit_geo(), {})
 
     def test_cross_site_auth_navigation_uses_native_document_headers(self):
         headers = self._session_stub().get_auth_navigate_headers(

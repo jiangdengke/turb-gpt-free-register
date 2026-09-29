@@ -9,7 +9,7 @@ import logging
 import random
 import secrets
 import time
-
+from urllib.parse import urlparse
 from config import openai_protocol as _protocol_cfg
 from core.session import BrowserSession
 from core.sentinel import (
@@ -19,6 +19,17 @@ from core.sentinel import (
 from core.sentinel_runner import generate_sentinel_token
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_url_for_log(value: object) -> str:
+    """Keep query parameters such as OAuth code/state out of logs."""
+    try:
+        parsed = urlparse(str(value or ""))
+        if parsed.scheme and parsed.netloc:
+            return f"{parsed.scheme}://{parsed.netloc}{parsed.path or '/'}"
+        return parsed.path or "<empty>"
+    except Exception:
+        return "<invalid-url>"
 
 
 def _rotate_document_navigation_id(session: BrowserSession) -> None:
@@ -275,7 +286,7 @@ def follow_authorize(session: BrowserSession, authorize_url: str) -> str:
             resp.raise_for_status()
             final_url = str(getattr(resp, "url", "") or "")
             _rotate_document_navigation_id(session)
-            logger.info(f"[步骤4] 重定向完成, 最终URL: {final_url}")
+            logger.info("[步骤4] 重定向完成, 最终URL: %s", _safe_url_for_log(final_url))
             return final_url
         except Exception as exc:
             last_exc = exc
@@ -309,6 +320,7 @@ def request_sentinel_token(session: BrowserSession, flow: str) -> dict:
             - "username_password_create": 步骤6
             - "email_otp_validate": 步骤9
             - "oauth_create_account": 步骤11
+            - "password_reset": 已认证账号添加密码
 
     Returns:
         sentinel 响应 JSON，包含 token、turnstile、proofofwork 等
@@ -545,6 +557,45 @@ def generate_registration_password(length: int = 14) -> str:
     return "".join(chars)
 
 
+def _is_create_account_password_url(value: object) -> bool:
+    try:
+        parsed = urlparse(str(value or ""))
+        return (
+            parsed.scheme == "https"
+            and parsed.netloc.lower() == "auth.openai.com"
+            and (parsed.path.rstrip("/") or "/") == "/create-account/password"
+        )
+    except Exception:
+        return False
+
+
+def navigate_create_account_password(
+    session: BrowserSession,
+    current_url: str | None = None,
+) -> str:
+    """Enter the password-first signup route before sending the registration OTP."""
+    current = str(current_url or "")
+    if _is_create_account_password_url(current):
+        return current
+
+    url = "https://auth.openai.com/create-account/password"
+    referer = current if current.startswith("https://auth.openai.com/") else "https://auth.openai.com/"
+    headers = session.get_auth_navigate_headers(referer=referer)
+    headers["sec-fetch-site"] = "same-origin"
+    headers["sec-fetch-user"] = "?1"
+    logger.info("[步骤5] 切换到创建账号密码页...")
+    resp = session.get(url, headers=headers, allow_redirects=True)
+    resp.raise_for_status()
+    _rotate_document_navigation_id(session)
+    final_url = str(getattr(resp, "url", "") or url)
+    if not _is_create_account_password_url(final_url):
+        raise RuntimeError(
+            f"无法进入注册密码页，最终落点: {_safe_url_for_log(final_url)}"
+        )
+    logger.info("[步骤5] 已进入创建账号密码页")
+    return final_url
+
+
 def register_user(
     session: BrowserSession,
     email: str,
@@ -562,7 +613,7 @@ def register_user(
     logger.info("[步骤7] 提交邮箱和密码：%s", email)
     resp = session.post(url, headers=headers, data=body)
     if resp.status_code != 200:
-        logger.error("[步骤7] user/register 失败 status=%s body=%s", resp.status_code, (resp.text or "")[:500])
+        logger.error("[步骤7] user/register 失败 status=%s", resp.status_code)
         resp.raise_for_status()
     data = resp.json()
     return data
@@ -581,7 +632,9 @@ def navigate_email_otp_send(session: BrowserSession, continue_url: str | None = 
     _rotate_document_navigation_id(session)
     final_url = str(getattr(resp, "url", "") or "")
     if "/email-verification" not in final_url:
-        raise RuntimeError(f"OTP 发送导航落点异常: {final_url}")
+        raise RuntimeError(
+            f"OTP 发送导航落点异常: {_safe_url_for_log(final_url)}"
+        )
     return final_url
 
 # def get_create_account_page(session: BrowserSession) -> None:
@@ -664,8 +717,11 @@ def navigate_about_you(session: BrowserSession, about_url: str | None = None) ->
         raise RuntimeError(f"about-you 导航失败 status={resp.status_code}: {(resp.text or '')[:240]}")
     final_url = str(getattr(resp, "url", "") or url)
     if "/api/accounts/user/register" in final_url or "/create-account/password" in final_url:
-        raise RuntimeError(f"about-you 导航落入旧密码注册路径: {final_url}")
-    logger.info(f"[步骤10.5] about-you 导航完成，落点: {final_url}")
+        raise RuntimeError(
+            "about-you 导航落入旧密码注册路径: "
+            f"{_safe_url_for_log(final_url)}"
+        )
+    logger.info("[步骤10.5] about-you 导航完成，落点: %s", _safe_url_for_log(final_url))
     return final_url
 
 
@@ -678,7 +734,7 @@ def send_email_otp(session: BrowserSession, referer: str = "https://auth.openai.
     logger.info("[OTP] 请求重新发送邮箱验证码...")
     resp = session.get(url, headers=headers, allow_redirects=True)
     if resp.status_code >= 400:
-        logger.warning("[OTP] 重新发送验证码失败 status=%s: %s", resp.status_code, (resp.text or '')[:300])
+        logger.warning("[OTP] 重新发送验证码失败 status=%s", resp.status_code)
         resp.raise_for_status()
     _rotate_document_navigation_id(session)
     logger.info("[OTP] 重新发送验证码请求完成，status=%s", resp.status_code)
@@ -713,12 +769,11 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
 
     body = json.dumps({"code": code})
 
-    logger.info(f"[步骤10] 提交邮箱验证码: {code}")
+    logger.info("[步骤10] 提交邮箱验证码")
     resp = session.post(url, headers=headers, data=body)
 
     if resp.status_code != 200:
-        logger.error(f"[步骤10] 请求失败, 状态码: {resp.status_code}")
-        logger.error(f"[步骤10] 响应内容: {resp.text}")
+        logger.error("[步骤10] 请求失败, 状态码=%s", resp.status_code)
         # 先看是不是"账号已废"——这类邮箱再试也没用，单独抛出让上层标 failed
         err_code = _extract_error_code(resp)
         if err_code in _ACCOUNT_DEAD_CODES:
@@ -730,13 +785,13 @@ def validate_email_otp(session: BrowserSession, code: str, sentinel_header: str 
             'invalid', 'incorrect', 'expired', 'code', 'otp', 'verification',
             '验证码', '認証コード', '確認コード', 'コード'
         )):
-            raise EmailOtpInvalidError(f"邮箱验证码无效或已过期: status={resp.status_code}, body={(resp.text or '')[:240]}")
+            raise EmailOtpInvalidError(f"邮箱验证码无效或已过期: status={resp.status_code}")
         resp.raise_for_status()
 
     data = resp.json()
     page_type = data.get('page', {}).get('type')
     logger.info(f"[步骤10] 验证码验证成功: {page_type}")
-    logger.info(f"[步骤10] 验证响应摘要: {json.dumps(data, ensure_ascii=False)[:1000]}")
+    logger.info("[步骤10] 验证响应已成功，page_type=%s", page_type)
     return data
 
 

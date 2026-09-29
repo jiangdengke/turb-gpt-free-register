@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import logging
 import threading
-from datetime import datetime
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
 from pathlib import Path
+from typing import Callable
 
 from config import email as _email_cfg
 from config import twofa as _twofa_cfg
@@ -93,17 +94,20 @@ def _append_log(email: str, line: str, *, clear: bool = False) -> None:
 def _run_twofa(
     *, account_id: int, email: str, access_token: str, proxy: str | None,
     trigger: str,
+    on_complete: Callable[[dict], None] | None = None,
 ) -> dict:
     fh: logging.FileHandler | None = None
     session: BrowserSession | None = None
     relay = None
+    completion_result: dict | None = None
     root_logger = logging.getLogger()
     thread_name = threading.current_thread().name
     try:
         with _LOCK:
             _RUNNING.add(int(account_id))
         if not db.mark_account_totp_setup_running(account_id):
-            return {"ok": False, "status": "failed", "error": "账号已删除或 2FA 状态已被重置"}
+            completion_result = {"ok": False, "status": "failed", "error": "账号已删除或 2FA 状态已被重置"}
+            return completion_result
         log_file = log_path(email)
         log_file.parent.mkdir(parents=True, exist_ok=True)
         log_file.write_text("", encoding="utf-8")
@@ -155,13 +159,12 @@ def _run_twofa(
                     )
         else:
             secret = setup_result
-        db.update_account_totp_secret(
-            account_id,
-            {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"},
-        )
+        result = {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
+        completion_result = result
+        db.update_account_totp_secret(account_id, result)
         _append_log(email, f"[2FA] 完成：secret={secret[:4]}...{secret[-4:]}")
         logger.info("[2FA] 完成：email=%s secret=%s...%s", email, secret[:4], secret[-4:])
-        return {"ok": True, "status": "success", "totp_secret": secret, "message": "2FA 设置完成"}
+        return result
     except Exception as exc:
         result = {"ok": False, "status": "failed", "error": f"{type(exc).__name__}: {str(exc)[:500]}"}
         try:
@@ -173,6 +176,7 @@ def _run_twofa(
         except Exception:
             pass
         logger.exception("[2FA] 后台异常: %s", email)
+        completion_result = result
         return result
     finally:
         if session is not None:
@@ -194,6 +198,15 @@ def _run_twofa(
         with _LOCK:
             _RUNNING.discard(int(account_id))
         _QUEUE_SLOTS.release()
+        if on_complete is not None and completion_result is not None:
+            try:
+                on_complete(completion_result)
+            except Exception as callback_exc:
+                logger.warning(
+                    "[2FA] 完成回调失败（不影响 2FA 结果）：account_id=%s error=%s",
+                    account_id,
+                    type(callback_exc).__name__,
+                )
 
 
 def queue_settings() -> dict:
@@ -213,6 +226,7 @@ def enqueue_account_totp_setup(
     access_token: str,
     trigger: str = "manual",
     proxy: str | None = None,
+    on_complete: Callable[[dict], None] | None = None,
 ) -> dict:
     account_id = int(account_id)
     email = str(email or "").strip()
@@ -238,6 +252,7 @@ def enqueue_account_totp_setup(
             access_token=access_token,
             proxy=proxy,
             trigger=str(trigger or "manual"),
+            on_complete=on_complete,
         )
         return {"accepted": True, "busy": False, "future": future, "log_path": str(log_path(email))}
     except Exception as exc:
