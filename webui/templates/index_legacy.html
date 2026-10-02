@@ -662,7 +662,7 @@
         <div>
           <h2>Codex 授权账号</h2>
           <p class="muted" style="font-size:12px;margin-top:4px;">
-            注册时自动跑 Codex 授权产出的 CPA 兼容凭证。点"下载 JSON"导出后可直接放到 CLIProxyAPI 的 <span class="mono">auths/</span> 目录使用。下载后会自动标记为已导出。
+            注册时自动跑 Codex 授权产出的本地 OAuth 凭证。可下载原始记录，或使用“导出CPA/导出Sub2”转换为对应目标格式；在线“从CPA下载”仍是连接 CPA auth-files 的独立操作。下载后会自动标记为已导出。
           </p>
         </div>
         <div class="buttons">
@@ -687,8 +687,10 @@
         <div class="search"><input id="qCodex" placeholder="搜索邮箱、plan、account_id…"></div>
         <div class="buttons">
           <span class="muted" id="codexSelectedHint" style="font-size:12px;align-self:center;margin-right:4px;">已选 0</span>
-          <button class="btn primary" id="btnCodexDownloadBulk" disabled title="把选中的多个本地凭证打包成一个 JSON 文件下载（备份/迁移用，CPA 不能直接读，需先解包）">批量下载本地</button>
-          <button class="btn good" id="btnCodexDownloadBulkCpa" disabled title="从 CPA auth-files 下载选中账号的真实 Codex JSON，并打包成 ZIP（可直接解压放入 CPA auth-dir）">批量从CPA下载</button>
+          <button class="btn primary" id="btnCodexDownloadBulk" disabled title="把选中的多个本地原始记录打包成一个备份 JSON；不是 CPA/Sub2API 文件">批量下载本地</button>
+          <button class="btn good" id="btnCodexExportLocalCpa" disabled title="不连接 CPA，把本地完整 OAuth 凭证转换为 CPA auth-file">导出CPA</button>
+          <button class="btn good" id="btnCodexExportLocalSub2" disabled title="不连接 Sub2API，把本地完整 OAuth 凭证转换为 Sub2API accounts JSON">导出Sub2</button>
+          <button class="btn good" id="btnCodexDownloadBulkCpa" disabled title="连接 CPA，从 auth-files 下载真实 Codex JSON，并打包成 ZIP">批量从CPA下载</button>
           <button class="btn" id="btnCodexDeleteBulk" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
         </div>
       </div>
@@ -3178,6 +3180,10 @@ const CODEX_SELECTED = new Set();
 function _codexUpdateSelectedHint() {
   $('#codexSelectedHint').textContent = `已选 ${CODEX_SELECTED.size}`;
   $('#btnCodexDownloadBulk').disabled = CODEX_SELECTED.size === 0;
+  const cpaExportBtn = $('#btnCodexExportLocalCpa');
+  if (cpaExportBtn) cpaExportBtn.disabled = CODEX_SELECTED.size === 0;
+  const sub2ExportBtn = $('#btnCodexExportLocalSub2');
+  if (sub2ExportBtn) sub2ExportBtn.disabled = CODEX_SELECTED.size === 0;
   const cpaBulkBtn = $('#btnCodexDownloadBulkCpa');
   if (cpaBulkBtn) cpaBulkBtn.disabled = CODEX_SELECTED.size === 0;
   const delBtn = $('#btnCodexDeleteBulk');
@@ -3202,8 +3208,10 @@ function renderCodex() {
       <td class="muted">${esc(r.mtime || '-')}</td>
       <td class="muted">${esc(r.expired || '-')}</td>
       <td class="actions">
-        <button class="primary" data-codex-download="${esc(r.filename)}" title="从 SQLite 下载 JSON/回执">下载凭证</button>
-        <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="按邮箱从 CPA auth-files 下载真实 Codex JSON">从CPA下载</button>
+        <button class="primary" data-codex-download="${esc(r.filename)}" title="从 SQLite 下载本地原始 JSON/回执">下载原文</button>
+        <button class="good" data-codex-export-format="cpa" data-codex-export-filename="${esc(r.filename)}" title="不连接 CPA，转换本地完整凭证为 CPA auth-file">导出CPA</button>
+        <button class="good" data-codex-export-format="sub2api" data-codex-export-filename="${esc(r.filename)}" title="不连接 Sub2API，转换本地完整凭证为 Sub2API JSON">导出Sub2</button>
+        <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="连接 CPA，从 auth-files 下载真实 Codex JSON">从CPA下载</button>
         ${exported ? `<button data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : ''}
         <button class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
       </td>
@@ -3246,8 +3254,8 @@ $('#btnCodexDownloadBulk').addEventListener('click', async () => {
   if (CODEX_SELECTED.size === 0) return;
   const filenames = Array.from(CODEX_SELECTED);
   const note = `选中 ${filenames.length} 个凭证，打包到一个 JSON 文件下载。\n\n` +
-               `⚠ 这个聚合格式 CPA 不能直接读，主要用于备份/迁移。\n` +
-               `要给 CPA 用请用每行的"下载 JSON"单个下载。\n\n继续？`;
+               `⚠ 这是本地原始备份，不是 CPA/Sub2API 导入文件。\n` +
+               `需要目标格式时请使用“导出CPA”或“导出Sub2”。\n\n继续？`;
   if (!confirm(note)) return;
   $('#btnCodexDownloadBulk').disabled = true;
   try {
@@ -3279,6 +3287,20 @@ $('#btnCodexDownloadBulk').addEventListener('click', async () => {
   }
 });
 
+
+$('#btnCodexExportLocalCpa').addEventListener('click', async () => {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  if (!confirm(`将选中的 ${filenames.length} 个本地完整凭证转换为 CPA 格式？\n\n多账号会下载为独立 JSON + manifest.json 的 ZIP；不连接 CPA。`)) return;
+  await downloadCodexLocalFormat('cpa', filenames, $('#btnCodexExportLocalCpa'), true);
+});
+
+$('#btnCodexExportLocalSub2').addEventListener('click', async () => {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  if (!confirm(`将选中的 ${filenames.length} 个本地完整凭证转换为 Sub2API accounts JSON？\n\n不连接 Sub2API；回执记录会被拒绝。`)) return;
+  await downloadCodexLocalFormat('sub2api', filenames, $('#btnCodexExportLocalSub2'), true);
+});
 
 $('#btnCodexDownloadBulkCpa').addEventListener('click', async () => {
   if (CODEX_SELECTED.size === 0) return;
@@ -3340,7 +3362,52 @@ $('#btnCodexDeleteBulk').addEventListener('click', async () => {
   }
 });
 
+async function downloadCodexLocalFormat(target, filenames, button, clearSelection = false) {
+  const label = target === 'sub2api' ? 'Sub2API' : 'CPA';
+  const list = Array.from(new Set((filenames || []).filter(Boolean)));
+  if (!list.length) { showToast('请先选择凭证'); return; }
+  if (button) button.disabled = true;
+  try {
+    const resp = await fetch('/api/codex/export-local-format', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target, filenames: list }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      const detail = Array.isArray(body.errors) && body.errors.length
+        ? '；' + body.errors.slice(0, 3).map(x => `${x.filename}: ${x.error}`).join('；') : '';
+      throw new Error((body.error || ('HTTP ' + resp.status)) + detail);
+    }
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const fallback = target === 'sub2api' ? `sub2api-codex-${Date.now()}.json` : `codex-cpa-local-${Date.now()}.zip`;
+    const dlname = m ? m[1] : fallback;
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = dlname;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+    showToast(`已导出 ${list.length} 个 ${label} 格式`);
+    if (clearSelection) list.forEach(fname => CODEX_SELECTED.delete(fname));
+    setTimeout(loadCodex, 600);
+  } catch(err) {
+    showToast(`导出${label}失败: ` + err.message);
+  } finally {
+    if (button) button.disabled = false;
+    _codexUpdateSelectedHint();
+  }
+}
+
 $('#codexBody').addEventListener('click', async (e) => {
+  const localExport = e.target.closest('[data-codex-export-format]');
+  if (localExport) {
+    const target = localExport.dataset.codexExportFormat;
+    const fname = localExport.dataset.codexExportFilename;
+    const label = target === 'sub2api' ? 'Sub2API' : 'CPA';
+    if (!confirm(`将本地凭证转换为 ${label} 格式并下载？\n\n${fname}\n\n此操作不连接 ${label === 'CPA' ? 'CPA' : 'Sub2API'}。`)) return;
+    await downloadCodexLocalFormat(target, [fname], localExport);
+    return;
+  }
   const dlCpa = e.target.closest('[data-codex-download-cpa]');
   if (dlCpa) {
     const fname = dlCpa.dataset.codexDownloadCpa;

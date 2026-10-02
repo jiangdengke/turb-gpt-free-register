@@ -1956,7 +1956,7 @@ def create_app(auth_code: str | None = None) -> Flask:
         return jsonify({"ok": True, "deleted": deleted})
 
     # ----------------------------------------------------------
-    # Codex 授权账号（CPA 兼容凭证）
+    # Codex 授权账号与本地格式导出
     # ----------------------------------------------------------
     @app.get("/api/codex")
     def api_codex_list():
@@ -2046,8 +2046,10 @@ def create_app(auth_code: str | None = None) -> Flask:
     @app.get("/api/codex/download/<path:filename>")
     def api_codex_download(filename: str):
         """
-        下载一个 CPA 兼容的 codex-*.json 文件，下载即标记为已导出（计数+1）。
-        前端通过浏览器原生下载触发（a 标签 / window.location）。
+        下载 SQLite 中保存的本地 Codex JSON/回执原文，下载即标记为已导出。
+
+        该接口不连接 CPA，也不承诺把本地记录转换成 CPA auth-file；需要
+        明确目标格式时使用 /api/codex/export-local-format。
         """
         try:
             content, fname = db.read_codex_credential(filename)
@@ -2058,6 +2060,163 @@ def create_app(auth_code: str | None = None) -> Flask:
             content,
             mimetype="application/json",
             headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+        )
+
+    @app.post("/api/codex/export-local-format")
+    def api_codex_export_local_format():
+        """将本地完整 Codex OAuth 凭证转换为 CPA 或 Sub2API 文件。
+
+        Body: {"target": "cpa"|"sub2api", "filenames": ["codex-...json"]}
+
+        CPA 多文件导出返回 ZIP；ZIP 中每个凭证都是独立 CPA JSON，并附带
+        不含敏感值的 manifest.json。Sub2API 导出返回一个 accounts[] JSON。
+        该接口完全本地转换，不请求 CPA/Sub2API。
+        """
+        import io
+        import re as _re
+        import zipfile
+        from datetime import datetime as _dt, timezone as _timezone
+        from core.codex_export_formats import (
+            CodexExportError,
+            build_cpa_document,
+            build_sub2api_account,
+            build_sub2api_document,
+        )
+
+        data = request.get_json(silent=True) or {}
+        target = str(data.get("target") or "").strip().lower()
+        filenames = data.get("filenames") or []
+        if target not in {"cpa", "sub2api", "sub2"}:
+            return jsonify({"ok": False, "error": "target 必须是 cpa 或 sub2api"}), 400
+        if target == "sub2":
+            target = "sub2api"
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        if len(filenames) > 1000:
+            return jsonify({"ok": False, "error": "单次最多导出 1000 个凭证"}), 400
+
+        records = []
+        errors = []
+        seen = set()
+        for raw_name in filenames:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                errors.append({"filename": str(raw_name), "error": "文件名非法"})
+                continue
+            filename = raw_name.strip()
+            if filename in seen:
+                continue
+            seen.add(filename)
+            try:
+                content, real_name = db.read_codex_credential(filename)
+                payload = json.loads(content)
+                if not isinstance(payload, dict):
+                    raise CodexExportError("凭证内容不是 JSON 对象")
+                records.append((real_name, payload))
+            except (ValueError, json.JSONDecodeError, CodexExportError) as exc:
+                errors.append({"filename": filename, "error": str(exc)})
+
+        if target == "sub2api" and errors:
+            return jsonify({
+                "ok": False,
+                "error": "选中的记录中包含无法转换的凭证；未生成 Sub2API 文件",
+                "errors": errors,
+            }), 422
+        if not records:
+            return jsonify({
+                "ok": False,
+                "error": "没有可导出的完整 Codex OAuth 凭证",
+                "errors": errors,
+            }), 422
+
+        now = _dt.now(_timezone.utc)
+        if target == "sub2api":
+            valid_records = []
+            for real_name, payload in records:
+                try:
+                    # Validate each account before building the envelope so a
+                    # callback-only record cannot produce an ambiguous package.
+                    build_sub2api_account(payload, filename=real_name, now=now)
+                    valid_records.append((real_name, payload))
+                except CodexExportError as exc:
+                    errors.append({"filename": real_name, "error": str(exc)})
+            if errors:
+                return jsonify({
+                    "ok": False,
+                    "error": "选中的记录中包含无法转换的凭证；未生成 Sub2API 文件",
+                    "errors": errors,
+                }), 422
+            if not valid_records:
+                return jsonify({
+                    "ok": False,
+                    "error": "没有可导出的完整 Codex OAuth 凭证",
+                    "errors": errors,
+                }), 422
+            document = build_sub2api_document(valid_records, now=now)
+            for real_name, _payload in valid_records:
+                db.mark_codex_exported(real_name)
+            filename = f"sub2api-codex-{now.strftime('%Y%m%d-%H%M%S')}.json"
+            return Response(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                mimetype="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+            )
+
+        converted = []
+        for real_name, payload in records:
+            try:
+                converted.append((real_name, build_cpa_document(payload, filename=real_name, now=now)))
+            except CodexExportError as exc:
+                errors.append({"filename": real_name, "error": str(exc)})
+        if not converted:
+            return jsonify({
+                "ok": False,
+                "error": "没有可导出的完整 Codex OAuth 凭证",
+                "errors": errors,
+            }), 422
+        for real_name, _document in converted:
+            db.mark_codex_exported(real_name)
+
+        if len(converted) == 1 and not errors:
+            real_name, document = converted[0]
+            safe_name = _re.sub(r"[^A-Za-z0-9._@+-]", "_", real_name)[:200] or "codex-export.json"
+            return Response(
+                json.dumps(document, ensure_ascii=False, indent=2) + "\n",
+                mimetype="application/json",
+                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+            )
+
+        buf = io.BytesIO()
+        used_names = set()
+        with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            manifest_files = []
+            for real_name, document in converted:
+                archive_name = real_name
+                if archive_name in used_names:
+                    stem, dot, ext = archive_name.rpartition(".")
+                    archive_name = f"{stem}-{len(used_names) + 1}{dot}{ext}" if dot else f"{archive_name}-{len(used_names) + 1}"
+                used_names.add(archive_name)
+                archive.writestr(archive_name, json.dumps(document, ensure_ascii=False, indent=2) + "\n")
+                manifest_files.append({"source_filename": real_name, "export_filename": archive_name})
+            manifest = {
+                "exported_at": now.isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                "source": "local-sqlite",
+                "target": "cpa",
+                "count": len(converted),
+                "files": manifest_files,
+                "errors": errors,
+            }
+            archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
+        buf.seek(0)
+        download_name = f"codex-cpa-local-{now.strftime('%Y%m%d-%H%M%S')}.zip"
+        return Response(
+            buf.getvalue(),
+            mimetype="application/zip",
+            headers={
+                "Content-Disposition": f'attachment; filename="{download_name}"',
+                "Content-Length": str(len(buf.getvalue())),
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.get("/api/codex/download-from-cpa/<path:filename>")

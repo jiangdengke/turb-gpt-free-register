@@ -1955,7 +1955,8 @@ def run_codex_oauth(
                 message=str(msg),
             )
 
-        # 7B. local 模式：保留旧实现，用本地 verifier 换 token 并保存 CPA 兼容授权文件。
+        # 7B. local 模式：保留旧实现，用本地 verifier 换 token 并保存本地 OAuth 存储记录；
+        #      需要目标格式时由 WebUI 的本地导出接口显式转换。
         if not code_verifier:
             raise RuntimeError("[Codex] local 模式缺少 code_verifier")
         token_resp = exchange_codex_token(session, code, code_verifier)

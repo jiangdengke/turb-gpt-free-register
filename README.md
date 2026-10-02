@@ -81,6 +81,10 @@ EMAIL_SOURCE = "outlook,generic_api,imap"
   - 本地 L 取号服务，见 `L_API.md`
 - 手机验证支持自动取号、填号、收码、提交、失败换号重试。
 - Codex 凭证保存到 SQLite 的 `codex_accounts` 表。
+- WebUI「下载本地」保留 SQLite 中的原始 JSON/回执；它不是目标格式转换器。
+- WebUI「导出CPA」和「导出Sub2」只在本地转换完整的普通 OAuth 凭证：CPA 输出扁平 `type=codex` auth-file，多账号附带不含 Token 的 `manifest.json`；Sub2API 输出 `exported_at / proxies / accounts[]`。
+- 本地格式导出不连接 CPA 或 Sub2API；「从CPA下载」仍是需要 CPA 管理地址和 `CPA_MANAGEMENT_KEY` 的在线 `auth-files` 操作。
+- 普通 OAuth 的 Sub2API 导出与 Codex Agent Identity 的「下载Agent/上传sub2」保持分离。
 
 ### WebUI
 
@@ -689,7 +693,7 @@ WebUI 页面说明：
 |---|---|
 | 注册 | 设置注册数量、线程数，启动批量注册，查看任务和日志 |
 | 账号 | 查看账号、复制 token、补跑 Codex、批量删除账号 |
-| Codex 授权 | 查看/下载/删除 SQLite 中的 Codex 凭证 |
+| Codex 授权 | 查看原始凭证、导出 CPA/Sub2API、在线从 CPA 下载、删除 SQLite 凭证 |
 | 邮箱池 | 导入邮箱、筛选来源、标记可用/失败、删除邮箱 |
 | 配置 | 修改运行配置并热加载，含 Roxy、Codex、邮箱、代理、人工节奏等 |
 
