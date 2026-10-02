@@ -81,6 +81,23 @@ class CodexExportFormatTests(unittest.TestCase):
         self.assertEqual(validate_cpa_document(cpa)["type"], "codex")
         self.assertEqual(len(validate_sub2api_document(sub2)["accounts"]), 1)
 
+    def test_cpa_omits_unavailable_optional_metadata(self):
+        result = build_cpa_document(
+            {
+                "type": "codex",
+                "access_token": "opaque-access-token",
+                "id_token": "opaque-id-token",
+                "account_id": "account-1",
+            },
+            now=NOW,
+        )
+        self.assertEqual(result["name"], "account-1")
+        self.assertNotIn("email", result)
+        self.assertNotIn("plan_type", result)
+        self.assertNotIn("chatgpt_plan_type", result)
+        self.assertNotIn("expired", result)
+        self.assertEqual(result["refresh_token"], "")
+
     def test_cpa_does_not_infer_session_token_from_refresh_token(self):
         result = build_cpa_document(self.payload, filename="codex-demo@example.com-plus.json", now=NOW)
         self.assertNotIn("session_token", result)

@@ -32,8 +32,7 @@ def validate_cpa_document(document: Mapping[str, Any]) -> dict[str, Any]:
         raise CodexExportError("CPA 导出结果不是 JSON 对象")
     required = (
         "type", "account_id", "chatgpt_account_id", "id_token", "access_token",
-        "refresh_token", "email", "name", "plan_type", "chatgpt_plan_type",
-        "last_refresh", "expired",
+        "refresh_token", "last_refresh",
     )
     missing = [key for key in required if key not in document]
     if missing:
@@ -41,8 +40,8 @@ def validate_cpa_document(document: Mapping[str, Any]) -> dict[str, Any]:
     if document.get("type") != "codex":
         raise CodexExportError("CPA 导出结果 type 必须是 codex")
     for key in ("account_id", "chatgpt_account_id", "id_token", "access_token"):
-        if not _text(document.get(key)):
-            raise CodexExportError(f"CPA 导出结果 {key} 为空")
+        if not isinstance(document.get(key), str) or not document[key].strip():
+            raise CodexExportError(f"CPA 导出结果 {key} 为空或类型非法")
     if "id_token_synthetic" in document and not isinstance(document["id_token_synthetic"], bool):
         raise CodexExportError("CPA 导出结果 id_token_synthetic 必须是布尔值")
     return dict(document)
@@ -62,8 +61,8 @@ def validate_sub2api_account(account: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(credentials, Mapping):
         raise CodexExportError("Sub2API credentials 不是 JSON 对象")
     for key in ("access_token", "chatgpt_account_id"):
-        if not _text(credentials.get(key)):
-            raise CodexExportError(f"Sub2API credentials {key} 为空")
+        if not isinstance(credentials.get(key), str) or not credentials[key].strip():
+            raise CodexExportError(f"Sub2API credentials {key} 为空或类型非法")
     if not isinstance(account.get("extra"), Mapping):
         raise CodexExportError("Sub2API extra 不是 JSON 对象")
     return dict(account)
@@ -92,9 +91,8 @@ def _text(value: Any) -> str:
 
 def _first(*values: Any) -> str:
     for value in values:
-        text = _text(value)
-        if text:
-            return text
+        if isinstance(value, str) and value.strip():
+            return value.strip()
     return ""
 
 
@@ -184,10 +182,9 @@ def _normalize_expiry(*values: Any) -> tuple[str, int | None]:
             continue
         epoch = _epoch_from_time(value)
         if epoch is not None:
-            return _iso_from_epoch(epoch), epoch
-        text = _text(value)
-        if text:
-            return text, None
+            normalized = _iso_from_epoch(epoch)
+            if normalized:
+                return normalized, epoch
     return "", None
 
 
@@ -241,10 +238,20 @@ def _candidate_maps(payload: Mapping[str, Any]) -> tuple[Mapping[str, Any], ...]
 def _from_maps(maps: tuple[Mapping[str, Any], ...], *keys: str) -> str:
     for item in maps:
         for key in keys:
-            value = _text(item.get(key))
-            if value:
-                return value
+            value = item.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
     return ""
+
+
+def _from_maps_value(maps: tuple[Mapping[str, Any], ...], *keys: str) -> Any:
+    """Return a non-empty raw value for metadata such as numeric expiry."""
+    for item in maps:
+        for key in keys:
+            value = item.get(key)
+            if value is not None and value != "":
+                return value
+    return None
 
 
 def _plan_from_filename(filename: str) -> str:
@@ -327,7 +334,7 @@ def _build_context(
         # Match the reference converter: a valid access-JWT exp is the
         # authoritative expiry, with the locally stored timestamp as fallback.
         access_claims.get("exp"),
-        _from_maps(maps, "expired", "expires_at", "expiresAt", "expiry"),
+        _from_maps_value(maps, "expired", "expires_at", "expiresAt", "expiry"),
     )
     access_expiry_epoch = _epoch(access_claims.get("exp"))
 
@@ -375,16 +382,22 @@ def build_cpa_document(
         "type": "codex",
         "account_id": ctx["account_id"],
         "chatgpt_account_id": ctx["account_id"],
-        "email": ctx["email"],
-        "name": ctx["display_name"],
-        "plan_type": ctx["plan_type"],
-        "chatgpt_plan_type": ctx["plan_type"],
         "id_token": ctx["id_token"],
         "access_token": ctx["access_token"],
         "refresh_token": ctx["refresh_token"],
         "last_refresh": ctx["exported_at"],
-        "expired": ctx["expires_at"],
     }
+    # Match CPA's strip-undefined behavior: only emit metadata that was
+    # actually recovered from the local record or token claims.
+    for key, value in (
+        ("email", ctx["email"]),
+        ("name", ctx["display_name"]),
+        ("plan_type", ctx["plan_type"]),
+        ("chatgpt_plan_type", ctx["plan_type"]),
+        ("expired", ctx["expires_at"]),
+    ):
+        if value:
+            document[key] = value
     if ctx["id_token_synthetic"]:
         # CPA uses this as a boolean marker; the synthetic JWT itself remains
         # in id_token and must not be duplicated into a misleading field.
