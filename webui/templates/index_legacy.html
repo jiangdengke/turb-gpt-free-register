@@ -3380,7 +3380,9 @@ async function downloadCodexLocalFormat(target, filenames, button, clearSelectio
     }
     const cd = resp.headers.get('Content-Disposition') || '';
     const m = cd.match(/filename="([^"]+)"/);
-    const fallback = target === 'sub2api' ? `sub2api-codex-${Date.now()}.json` : `codex-cpa-local-${Date.now()}.zip`;
+    const fallback = target === 'sub2api'
+      ? `sub2api-codex-${Date.now()}.json`
+      : (list.length === 1 ? list[0] : `codex-cpa-local-${Date.now()}.zip`);
     const dlname = m ? m[1] : fallback;
     const blob = await resp.blob();
     const url = URL.createObjectURL(blob);

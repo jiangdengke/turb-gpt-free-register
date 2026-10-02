@@ -324,10 +324,12 @@ def _build_context(
     display_name = _from_maps(maps, "name", "display_name", "displayName") or _first(email, account_id)
 
     expiry_text, expiry_epoch = _normalize_expiry(
-        _from_maps(maps, "expired", "expires_at", "expiresAt", "expiry"),
+        # Match the reference converter: a valid access-JWT exp is the
+        # authoritative expiry, with the locally stored timestamp as fallback.
         access_claims.get("exp"),
+        _from_maps(maps, "expired", "expires_at", "expiresAt", "expiry"),
     )
-    access_expiry_epoch = _epoch(access_claims.get("exp")) or expiry_epoch
+    access_expiry_epoch = _epoch(access_claims.get("exp"))
 
     synthetic = False
     if not id_token:
@@ -354,6 +356,7 @@ def _build_context(
         "auth_provider": auth_provider,
         "display_name": display_name,
         "expires_at": expiry_text,
+        "expiry_epoch": expiry_epoch,
         "access_expiry_epoch": access_expiry_epoch,
         "exported_at": exported_at,
         "now_epoch": now_epoch,
@@ -422,12 +425,14 @@ def build_sub2api_account(
             "last_refresh": ctx["exported_at"],
         },
     }
-    if not has_refresh and ctx["access_expiry_epoch"]:
-        remaining = max(0, ctx["access_expiry_epoch"] - ctx["now_epoch"])
-        account["expires_at"] = ctx["access_expiry_epoch"]
-        account["auto_pause_on_expired"] = True
-        account["credentials"]["expires_at"] = ctx["expires_at"]
-        account["credentials"]["expires_in"] = remaining
+    if not has_refresh:
+        if ctx["access_expiry_epoch"]:
+            account["expires_at"] = ctx["access_expiry_epoch"]
+            account["auto_pause_on_expired"] = True
+        if ctx["expires_at"]:
+            account["credentials"]["expires_at"] = ctx["expires_at"]
+            if ctx["expiry_epoch"]:
+                account["credentials"]["expires_in"] = max(0, ctx["expiry_epoch"] - ctx["now_epoch"])
     # Match the reference converter's stripUnavailable behavior: omit empty
     # optional fields rather than serializing misleading empty metadata.
     account["credentials"] = {

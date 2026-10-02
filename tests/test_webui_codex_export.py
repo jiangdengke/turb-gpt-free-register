@@ -93,6 +93,8 @@ class WebUiCodexExportTests(unittest.TestCase):
                 context.__exit__(None, None, None)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
         body = response.get_json()
         self.assertEqual(body["type"], "codex")
         self.assertEqual(body["account_id"], "a1")
@@ -174,6 +176,7 @@ class WebUiCodexExportTests(unittest.TestCase):
                 context.__exit__(None, None, None)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
         body = response.get_json()
         self.assertEqual(body["proxies"], [])
         self.assertEqual(len(body["accounts"]), 1)

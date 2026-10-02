@@ -126,6 +126,20 @@ class CodexExportFormatTests(unittest.TestCase):
         self.assertIn("expires_at", result["credentials"])
         self.assertIn("expires_in", result["credentials"])
 
+    def test_sub2api_keeps_stored_expiry_without_fabricating_outer_access_expiry(self):
+        payload = {
+            **self.payload,
+            "access_token": "opaque-access-token",
+            "id_token": "opaque-id-token",
+            "expired": "2026-01-02T04:04:05Z",
+        }
+        payload.pop("refresh_token")
+        result = build_sub2api_account(payload, now=NOW)
+        self.assertNotIn("expires_at", result)
+        self.assertNotIn("auto_pause_on_expired", result)
+        self.assertEqual(result["credentials"]["expires_at"], "2026-01-02T04:04:05.000Z")
+        self.assertEqual(result["credentials"]["expires_in"], 3600)
+
     def test_sub2api_package_contains_all_accounts(self):
         result = build_sub2api_document(
             [("codex-demo@example.com-plus.json", self.payload)],
@@ -136,7 +150,12 @@ class CodexExportFormatTests(unittest.TestCase):
         self.assertEqual(len(result["accounts"]), 1)
 
     def test_epoch_milliseconds_are_normalized_without_crashing(self):
-        payload = {**self.payload, "expired": 1767326645000}
+        payload = {
+            **self.payload,
+            "access_token": "opaque-access-token",
+            "id_token": "opaque-id-token",
+            "expired": 1767326645000,
+        }
         result = build_cpa_document(payload, filename="codex-demo@example.com-plus.json", now=NOW)
         self.assertEqual(result["expired"], "2026-01-02T04:04:05.000Z")
 

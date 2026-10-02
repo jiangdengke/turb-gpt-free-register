@@ -2158,7 +2158,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             return Response(
                 json.dumps(document, ensure_ascii=False, indent=2) + "\n",
                 mimetype="application/json",
-                headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+                headers={
+                    "Content-Disposition": f'attachment; filename="{filename}"',
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
             )
 
         converted = []
@@ -2182,7 +2186,11 @@ def create_app(auth_code: str | None = None) -> Flask:
             return Response(
                 json.dumps(document, ensure_ascii=False, indent=2) + "\n",
                 mimetype="application/json",
-                headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+                headers={
+                    "Content-Disposition": f'attachment; filename="{safe_name}"',
+                    "Cache-Control": "no-store",
+                    "X-Content-Type-Options": "nosniff",
+                },
             )
 
         buf = io.BytesIO()
