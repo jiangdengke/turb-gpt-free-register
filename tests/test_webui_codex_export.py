@@ -119,6 +119,8 @@ class WebUiCodexExportTests(unittest.TestCase):
                 context.__exit__(None, None, None)
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
         downloaded = json.loads(response.data.decode("utf-8"))
         self.assertEqual(downloaded["local_only_marker"], "raw-value")
         self.assertEqual(downloaded["type"], "codex")

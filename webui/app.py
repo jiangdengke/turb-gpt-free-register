@@ -2059,7 +2059,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         return Response(
             content,
             mimetype="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{fname}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{fname}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/codex/export-local-format")
@@ -2248,7 +2252,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         return Response(
             cpa_text,
             mimetype="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{cpa_name}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{cpa_name}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/codex/download-bulk-from-cpa")
@@ -2314,7 +2322,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         return Response(
             buf.getvalue(),
             mimetype="application/zip",
-            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{dl_name}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/codex/download-bulk")
@@ -2371,7 +2383,11 @@ def create_app(auth_code: str | None = None) -> Flask:
         return Response(
             _json.dumps(result, ensure_ascii=False, indent=2),
             mimetype="application/json",
-            headers={"Content-Disposition": f'attachment; filename="{dl_name}"'},
+            headers={
+                "Content-Disposition": f'attachment; filename="{dl_name}"',
+                "Cache-Control": "no-store",
+                "X-Content-Type-Options": "nosniff",
+            },
         )
 
     @app.post("/api/codex/reset-export")
