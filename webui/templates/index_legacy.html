@@ -690,6 +690,7 @@
           <button class="btn primary" id="btnCodexDownloadBulk" disabled title="把选中的多个本地原始记录打包成一个备份 JSON；不是 CPA/Sub2API 文件">批量下载本地</button>
           <button class="btn good" id="btnCodexExportLocalCpa" disabled title="不连接 CPA，把本地完整 OAuth 凭证转换为 CPA auth-file">导出CPA</button>
           <button class="btn good" id="btnCodexExportLocalSub2" disabled title="不连接 Sub2API，把本地完整 OAuth 凭证转换为 Sub2API accounts JSON">导出Sub2</button>
+          <button class="btn good" id="btnCodexExportLoginCredentials" disabled title="按选中的 Codex 凭证邮箱匹配账号，导出邮箱、注册密码和 2FA 密钥">导出登录凭据</button>
           <button class="btn good" id="btnCodexDownloadBulkCpa" disabled title="连接 CPA，从 auth-files 下载真实 Codex JSON，并打包成 ZIP">批量从CPA下载</button>
           <button class="btn" id="btnCodexDeleteBulk" disabled title="删除选中的本地 Codex JSON 凭证文件">删除选中</button>
         </div>
@@ -3186,6 +3187,8 @@ function _codexUpdateSelectedHint() {
   if (sub2ExportBtn) sub2ExportBtn.disabled = CODEX_SELECTED.size === 0;
   const cpaBulkBtn = $('#btnCodexDownloadBulkCpa');
   if (cpaBulkBtn) cpaBulkBtn.disabled = CODEX_SELECTED.size === 0;
+  const loginBtn = $('#btnCodexExportLoginCredentials');
+  if (loginBtn) loginBtn.disabled = CODEX_SELECTED.size === 0;
   const delBtn = $('#btnCodexDeleteBulk');
   if (delBtn) delBtn.disabled = CODEX_SELECTED.size === 0;
 }
@@ -3211,6 +3214,7 @@ function renderCodex() {
         <button class="primary" data-codex-download="${esc(r.filename)}" title="从 SQLite 下载本地原始 JSON/回执">下载原文</button>
         <button class="good" data-codex-export-format="cpa" data-codex-export-filename="${esc(r.filename)}" title="不连接 CPA，转换本地完整凭证为 CPA auth-file">导出CPA</button>
         <button class="good" data-codex-export-format="sub2api" data-codex-export-filename="${esc(r.filename)}" title="不连接 Sub2API，转换本地完整凭证为 Sub2API JSON">导出Sub2</button>
+        <button class="good" data-codex-login-credentials="${esc(r.filename)}" title="按凭证邮箱匹配账号并导出登录凭据">导出登录凭据</button>
         <button class="good" data-codex-download-cpa="${esc(r.filename)}" title="连接 CPA，从 auth-files 下载真实 Codex JSON">从CPA下载</button>
         ${exported ? `<button data-codex-reset="${esc(r.filename)}" title="重新标记为未导出">重置标记</button>` : ''}
         <button class="danger" data-codex-delete="${esc(r.filename)}" title="删除本地 Codex JSON 凭证文件">删除</button>
@@ -3287,6 +3291,59 @@ $('#btnCodexDownloadBulk').addEventListener('click', async () => {
   }
 });
 
+
+function codexSkippedReasonSummary(items) {
+  const counts = new Map();
+  (Array.isArray(items) ? items : []).forEach(item => {
+    const reason = String(item?.reason || '未知原因');
+    counts.set(reason, (counts.get(reason) || 0) + 1);
+  });
+  return Array.from(counts, ([reason, count]) => `${reason} ${count} 个`).join('、');
+}
+async function exportCodexLoginCredentials(filenames, button = null, clearSelection = false) {
+  const list = Array.from(new Set((filenames || []).filter(Boolean)));
+  if (!list.length) { showToast('请先选择凭证'); return; }
+  if (button) button.disabled = true;
+  try {
+    const resp = await fetch('/api/codex/export-login-credentials', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filenames: list }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      const reasons = codexSkippedReasonSummary(body.skipped);
+      const detail = Array.isArray(body.skipped) && body.skipped.length
+        ? `；跳过 ${body.skipped.length} 个${reasons ? `（${reasons}）` : ''}` : '';
+      throw new Error((body.error || ('HTTP ' + resp.status)) + detail);
+    }
+    const cd = resp.headers.get('Content-Disposition') || '';
+    const match = cd.match(/filename="([^"]+)"/);
+    const dlname = match ? match[1] : `codex-login-credentials-${Date.now()}.txt`;
+    const exported = Number(resp.headers.get('X-Codex-Exported-Count') || 0);
+    const skipped = Number(resp.headers.get('X-Codex-Skipped-Count') || 0);
+    let skippedDetails = [];
+    try { skippedDetails = JSON.parse(resp.headers.get('X-Codex-Skipped') || '[]'); } catch (_) {}
+    const reasons = codexSkippedReasonSummary(skippedDetails);
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.href = url; a.download = dlname;
+    document.body.appendChild(a); a.click();
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 800);
+    showToast(`已导出 ${exported || list.length} 个登录凭据${skipped ? `，跳过 ${skipped} 个${reasons ? `（${reasons}）` : ''}${resp.headers.get('X-Codex-Skipped-Truncated') ? '，原因仅显示部分' : ''}` : ''}`);
+    if (clearSelection) list.forEach(fname => CODEX_SELECTED.delete(fname));
+  } catch (err) {
+    showToast('导出登录凭据失败: ' + err.message);
+  } finally {
+    if (button) button.disabled = false;
+    _codexUpdateSelectedHint();
+  }
+}
+$('#btnCodexExportLoginCredentials').addEventListener('click', async () => {
+  if (CODEX_SELECTED.size === 0) return;
+  const filenames = Array.from(CODEX_SELECTED);
+  if (!confirm(`将选中的 ${filenames.length} 个 Codex 凭证按邮箱匹配账号并导出登录凭据？\n\n未匹配账号的记录会跳过，密码为空使用“未设置”，2FA 为空保留空字段。`)) return;
+  await exportCodexLoginCredentials(filenames, $('#btnCodexExportLoginCredentials'), true);
+});
 
 $('#btnCodexExportLocalCpa').addEventListener('click', async () => {
   if (CODEX_SELECTED.size === 0) return;
@@ -3401,6 +3458,12 @@ async function downloadCodexLocalFormat(target, filenames, button, clearSelectio
 }
 
 $('#codexBody').addEventListener('click', async (e) => {
+  const loginCredentials = e.target.closest('[data-codex-login-credentials]');
+  if (loginCredentials) {
+    if (!confirm(`按凭证邮箱匹配账号并导出登录凭据？\n\n${loginCredentials.dataset.codexLoginCredentials}\n\n未匹配账号的记录会跳过。`)) return;
+    await exportCodexLoginCredentials([loginCredentials.dataset.codexLoginCredentials], loginCredentials);
+    return;
+  }
   const localExport = e.target.closest('[data-codex-export-format]');
   if (localExport) {
     const target = localExport.dataset.codexExportFormat;

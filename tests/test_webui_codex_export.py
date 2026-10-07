@@ -185,12 +185,143 @@ class WebUiCodexExportTests(unittest.TestCase):
         self.assertEqual(body["accounts"][0]["type"], "oauth")
         self.assertEqual(body["accounts"][0]["credentials"]["email"], "demo@example.com")
 
-    def test_both_webui_templates_expose_local_export_controls(self):
+    def test_login_credentials_export_requires_existing_webui_auth(self):
+        with tempfile.TemporaryDirectory() as td:
+            context, client = self._app_with_credentials(Path(td), [])
+            try:
+                response = client.post(
+                    "/api/codex/export-login-credentials",
+                    json={"filenames": ["codex-demo@example.com-free.json"]},
+                )
+            finally:
+                context.__exit__(None, None, None)
+
+        self.assertEqual(response.status_code, 401)
+
+    def test_codex_list_does_not_return_password_or_totp_fields(self):
+        with tempfile.TemporaryDirectory() as td:
+            codex_payload = self._credential("a1", "demo@example.com")
+            # Empty sentinels prove the compact list mapper omits these field names.
+            codex_payload.update({"registration_password": "", "totp_secret": ""})
+            context, client = self._app_with_credentials(
+                Path(td),
+                [("codex-demo@example.com-free.json", codex_payload)],
+            )
+            try:
+                response = client.get("/api/codex", headers={"X-Auth-Code": "test-auth"})
+            finally:
+                context.__exit__(None, None, None)
+
+        self.assertEqual(response.status_code, 200)
+        body = json.dumps(response.get_json())
+        self.assertNotIn("registration_password", body)
+        self.assertNotIn("totp_secret", body)
+
+    def test_login_credentials_export_matches_accounts_and_sets_sensitive_headers(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            context, client = self._app_with_credentials(
+                root,
+                [("codex-demo@example.com-free.json", self._credential("a1", "demo@example.com"))],
+            )
+            try:
+                with patch("webui.app.db.get_account_by_email", return_value={
+                    "id": 41,
+                    "email": "demo@example.com",
+                    "extra_json": "{}",
+                    "totp_secret": "",
+                }) as lookup:
+                    response = client.post(
+                        "/api/codex/export-login-credentials",
+                        json={"filenames": ["codex-demo@example.com-free.json"]},
+                        headers={"X-Auth-Code": "test-auth"},
+                    )
+                    lookup.assert_called_once_with("demo@example.com")
+            finally:
+                context.__exit__(None, None, None)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        self.assertEqual(response.headers.get("X-Codex-Exported-Count"), "1")
+        self.assertEqual(response.headers.get("X-Codex-Skipped-Count"), "0")
+        self.assertEqual(response.data.decode("utf-8"), "demo@example.com---未设置---\n")
+
+    def test_login_credentials_export_reports_non_matching_records_without_download(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            context, client = self._app_with_credentials(
+                root,
+                [
+                    ("codex-demo@example.com-free.json", self._credential("a1", "demo@example.com")),
+                    ("codex-missing@example.com-free.json", self._credential("a2", "missing@example.com")),
+                ],
+            )
+            try:
+                def account_for_email(email):
+                    if email == "demo@example.com":
+                        return {
+                            "id": 41,
+                            "email": email,
+                            "extra_json": "{}",
+                            "totp_secret": "",
+                        }
+                    return None
+
+                with patch("webui.app.db.get_account_by_email", side_effect=account_for_email):
+                    response = client.post(
+                        "/api/codex/export-login-credentials",
+                        json={"filenames": [
+                            "codex-demo@example.com-free.json",
+                            "codex-missing@example.com-free.json",
+                        ]},
+                        headers={"X-Auth-Code": "test-auth"},
+                    )
+            finally:
+                context.__exit__(None, None, None)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data.decode("utf-8"), "demo@example.com---未设置---\n")
+        self.assertEqual(response.headers.get("X-Codex-Exported-Count"), "1")
+        self.assertEqual(response.headers.get("X-Codex-Skipped-Count"), "1")
+        skipped = json.loads(response.headers["X-Codex-Skipped"])
+        self.assertEqual(skipped[0]["reason"], "未匹配账号")
+        self.assertNotIn("---", response.headers["X-Codex-Skipped"])
+
+    def test_login_credentials_export_returns_structured_4xx_when_no_record_matches(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            context, client = self._app_with_credentials(
+                root,
+                [("codex-missing@example.com-free.json", self._credential("a2", "missing@example.com"))],
+            )
+            try:
+                with patch("webui.app.db.get_account_by_email", return_value=None):
+                    response = client.post(
+                        "/api/codex/export-login-credentials",
+                        json={"filenames": ["codex-missing@example.com-free.json"]},
+                        headers={"X-Auth-Code": "test-auth"},
+                    )
+            finally:
+                context.__exit__(None, None, None)
+
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
+        self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
+        body = response.get_json()
+        self.assertFalse(body["ok"])
+        self.assertEqual(body["exported_count"], 0)
+        self.assertEqual(body["skipped_count"], 1)
+        self.assertEqual(body["skipped"][0]["reason"], "未匹配账号")
+
+    def test_both_webui_templates_expose_local_and_login_credential_controls(self):
         for filename in ("webui/templates/index.html", "webui/templates/index_legacy.html"):
             text = Path(filename).read_text(encoding="utf-8")
             self.assertIn("/api/codex/export-local-format", text)
+            self.assertIn("/api/codex/export-login-credentials", text)
             self.assertIn("导出CPA", text)
             self.assertIn("导出Sub2", text)
+            self.assertIn("导出登录凭据", text)
             self.assertIn("下载原文", text)
 
     def test_callback_receipt_is_rejected_for_sub2_export(self):

@@ -1996,6 +1996,88 @@ def create_app(auth_code: str | None = None) -> Flask:
             "accounts": result["items"],
         })
 
+    @app.post("/api/codex/export-login-credentials")
+    def api_codex_export_login_credentials():
+        """导出选中 Codex 凭证对应账号的登录凭据 TXT。"""
+        from datetime import datetime as _dt
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求体必须是 JSON 对象"}), 400
+        filenames = data.get("filenames") or []
+        if not isinstance(filenames, list) or not filenames:
+            return jsonify({"ok": False, "error": "filenames 必须是非空数组"}), 400
+        if len(filenames) > 1000:
+            return jsonify({"ok": False, "error": "单次最多导出 1000 个凭证"}), 400
+
+        rows = []
+        skipped = []
+        seen = set()
+        for raw_name in filenames:
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                skipped.append({"filename": str(raw_name)[:80], "reason": "文件名非法"})
+                continue
+            filename = raw_name.strip()
+            if len(filename) > 255:
+                skipped.append({"filename": filename[:80], "reason": "文件名过长"})
+                continue
+            if filename in seen:
+                continue
+            seen.add(filename)
+            try:
+                content, real_name = db.read_codex_credential(filename)
+                payload = json.loads(content)
+            except (ValueError, json.JSONDecodeError):
+                skipped.append({"filename": filename, "reason": "凭证不存在或内容无效"})
+                continue
+            if not isinstance(payload, dict):
+                skipped.append({"filename": real_name, "reason": "凭证内容无效"})
+                continue
+            email = str(payload.get("email") or "").strip()
+            if not email:
+                skipped.append({"filename": real_name, "reason": "凭证缺少邮箱"})
+                continue
+            account = db.get_account_by_email(email)
+            if not account:
+                skipped.append({"filename": real_name, "reason": "未匹配账号"})
+                continue
+            # 账号匹配成功后才按需读取密码和 TOTP；普通 Codex 列表不会经过这里。
+            rows.append(_account_secret_value(account, "login_credentials"))
+
+        if not rows:
+            response = jsonify({
+                "ok": False,
+                "error": "没有可导出的登录凭据",
+                "exported_count": 0,
+                "skipped_count": len(skipped),
+                "skipped": skipped,
+            })
+            response.headers["Cache-Control"] = "no-store"
+            response.headers["X-Content-Type-Options"] = "nosniff"
+            return response, 422
+
+        now = _dt.now()
+        filename = f"codex-login-credentials-{now.strftime('%Y%m%d-%H%M%S')}.txt"
+        skipped_header_items = []
+        for item in skipped[:50]:
+            safe_item = {**item, "filename": str(item.get("filename") or "")[:80]}
+            candidate = [*skipped_header_items, safe_item]
+            encoded = json.dumps(candidate, ensure_ascii=True, separators=(",", ":"))
+            if len(encoded) > 4096:
+                break
+            skipped_header_items = candidate
+        headers = {
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Cache-Control": "no-store",
+            "X-Content-Type-Options": "nosniff",
+            "X-Codex-Exported-Count": str(len(rows)),
+            "X-Codex-Skipped-Count": str(len(skipped)),
+            # 只包含截断文件名和固定原因，不包含账号敏感字段；限制头部长度。
+            "X-Codex-Skipped": json.dumps(skipped_header_items, ensure_ascii=True, separators=(",", ":")),
+        }
+        if len(skipped_header_items) < len(skipped):
+            headers["X-Codex-Skipped-Truncated"] = "true"
+        return Response("\n".join(rows) + "\n", mimetype="text/plain", headers=headers)
+
     @app.post("/api/codex/archive")
     def api_codex_archive():
         """归档/取消归档一条 Codex 授权凭证。Body {filename, archived}。"""
