@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Use repository quality and validation conventions while changing tracked project configuration."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Keep project-level automation files organized and distinguish source from runtime files."}
+{"file":".trellis/spec/guides/code-reuse-thinking-guide.md","reason":"Check existing ignore rules before adding duplicate patterns."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Verify root and directory-level ignore rules remain consistent."}

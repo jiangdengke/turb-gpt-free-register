@@ -96,3 +96,8 @@ run/
 .tmp-chatgpt2api-inspect/
 artifacts/
 AGENTS.md
+
+# Project-local agent dependencies and runtime state
+.pi/npm/node_modules/
+.trellis/.runtime/
+.trellis/.developer

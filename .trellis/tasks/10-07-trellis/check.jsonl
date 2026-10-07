@@ -1,0 +1,2 @@
+{"file":".trellis/spec/backend/quality-guidelines.md","reason":"Validate configuration changes and repository cleanliness."}
+{"file":".trellis/spec/backend/directory-structure.md","reason":"Review tracked versus generated project files."}
